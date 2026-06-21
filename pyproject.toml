@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snapclass"
+version = "0.1.0"
+description = "Human-readable file persistence for Python dataclasses."
+requires-python = ">=3.11"
+dependencies = [
+  "json5>=0.9,<1",
+  "ruamel.yaml>=0.18,<0.20",
+  "tomlkit>=0.10,<0.16",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+]
+typing = [
+  "mypy>=1.11,<3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+snapclass = ["py.typed"]

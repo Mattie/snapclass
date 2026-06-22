@@ -124,9 +124,7 @@ def test_yaml_non_mapping_file_loads_as_empty_data_for_defaults(tmp_path):
     assert path.read_text(encoding="utf-8") == original
 
 
-def test_registered_builtin_yaml_formatter_non_mapping_file_loads_as_empty_data(tmp_path):
-    formatters.register(".yml", formatters.YAML)
-
+def test_builtin_yaml_formatter_non_mapping_file_loads_as_empty_data(tmp_path):
     @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
     class Config:
         name: str

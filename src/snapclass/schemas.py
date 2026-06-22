@@ -60,6 +60,8 @@ class Config:
     infer: bool = False
     fields: dict[str, Any] | None = None
     formatter: type[FileFormatter] | None = None
+    minimal_diffs: bool | None = None
+    write_delay: float | None = None
     unknown: str = "ignore"
     extras_field: str | None = None
     migrate: Callable[..., Mapping[str, Any] | None] | None = None
@@ -76,6 +78,8 @@ class Meta:
     snapshot_infer: bool = False
     snapshot_stash: Any = None
     snapshot_formatter: Any = None
+    snapshot_minimal_diffs: bool | None = None
+    snapshot_write_delay: float | None = None
     snapshot_unknown: str = "ignore"
     snapshot_extras_field: str | None = None
     snapshot_migrate: Callable[..., Mapping[str, Any] | None] | None = None
@@ -92,6 +96,8 @@ def snapclass(
     infer: bool = False,
     fields: dict[str, Any] | None = None,
     formatter: type[FileFormatter] | None = None,
+    minimal_diffs: bool | None = None,
+    write_delay: float | None = None,
     unknown: str = "ignore",
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
@@ -119,6 +125,8 @@ def snapclass(
             infer=infer,
             fields=fields,
             formatter=formatter,
+            minimal_diffs=minimal_diffs,
+            write_delay=write_delay,
             unknown=unknown_policy,
             extras_field=extras_field,
             migrate=migrate,
@@ -139,6 +147,8 @@ def create_model(
     stash: Stash | str | os.PathLike[str] | None = None,
     defaults: bool | None = None,
     infer: bool | None = None,
+    minimal_diffs: bool | None = None,
+    write_delay: float | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
     conflict: str | None = None,
 ) -> type:
@@ -167,6 +177,12 @@ def create_model(
     if resolved_stash is not None:
         resolved_stash = _coerce_stash(resolved_stash)
     formatter = getattr(meta, "snapshot_formatter", None) if meta is not None else None
+    resolved_minimal_diffs = minimal_diffs if minimal_diffs is not None else (
+        getattr(meta, "snapshot_minimal_diffs", None) if meta is not None else None
+    )
+    resolved_write_delay = write_delay if write_delay is not None else (
+        getattr(meta, "snapshot_write_delay", None) if meta is not None else None
+    )
     unknown = getattr(meta, "snapshot_unknown", "ignore") if meta is not None else "ignore"
     extras_field = getattr(meta, "snapshot_extras_field", None) if meta is not None else None
     resolved_migrate = migrate if migrate is not None else (
@@ -184,6 +200,8 @@ def create_model(
         infer=resolved_infer,
         fields=resolved_fields,
         formatter=formatter,
+        minimal_diffs=resolved_minimal_diffs,
+        write_delay=resolved_write_delay,
         unknown=unknown,
         extras_field=extras_field,
         migrate=resolved_migrate,
@@ -197,6 +215,8 @@ def create_model(
         snapshot_infer=resolved_infer,
         snapshot_stash=resolved_stash,
         snapshot_formatter=formatter,
+        snapshot_minimal_diffs=resolved_minimal_diffs,
+        snapshot_write_delay=resolved_write_delay,
         snapshot_unknown=_normalize_unknown_policy(unknown, extras_field),
         snapshot_extras_field=extras_field,
         snapshot_migrate=resolved_migrate,
@@ -215,6 +235,8 @@ def _install_model_config(
     infer: bool = False,
     fields: dict[str, Any] | None = None,
     formatter: type[FileFormatter] | None = None,
+    minimal_diffs: bool | None = None,
+    write_delay: float | None = None,
     unknown: str = "ignore",
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
@@ -232,6 +254,8 @@ def _install_model_config(
         infer=infer,
         fields=fields,
         formatter=formatter,
+        minimal_diffs=minimal_diffs,
+        write_delay=write_delay,
         unknown=unknown_policy,
         extras_field=extras_field,
         migrate=migrate,
@@ -279,6 +303,8 @@ class Model:
             infer=getattr(meta, "snapshot_infer", False),
             fields=getattr(meta, "snapshot_fields", None),
             formatter=getattr(meta, "snapshot_formatter", None),
+            minimal_diffs=getattr(meta, "snapshot_minimal_diffs", None),
+            write_delay=getattr(meta, "snapshot_write_delay", None),
             unknown=getattr(meta, "snapshot_unknown", "ignore"),
             extras_field=getattr(meta, "snapshot_extras_field", None),
             migrate=getattr(meta, "snapshot_migrate", None),
@@ -296,6 +322,8 @@ def sync(
     defaults: bool = False,
     infer: bool = False,
     formatter: type[FileFormatter] | None = None,
+    minimal_diffs: bool | None = None,
+    write_delay: float | None = None,
     unknown: str = "ignore",
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
@@ -314,6 +342,8 @@ def sync(
         infer=infer,
         fields=fields,
         formatter=formatter,
+        minimal_diffs=minimal_diffs,
+        write_delay=write_delay,
         unknown=unknown_policy,
         extras_field=extras_field,
         migrate=migrate,
@@ -403,7 +433,7 @@ def _install(cls: type, config: Config) -> None:
                 object.__setattr__(self, _INFERRED_FIELDS_ATTR, inferred)
                 inferred_hints = dict(getattr(self, _INFERRED_HINTS_ATTR, {}))
                 if name in inferred_hints and not isinstance(value, (list, dict)):
-                    coerced = _coerce(value, inferred_hints[name], name)
+                    coerced = _coerce(value, inferred_hints[name], name, snapshot.stash)
                     object.__setattr__(self, name, coerced)
                 elif name not in inferred_hints:
                     inferred_hint = _infer_hint(value)
@@ -477,6 +507,8 @@ class Snapshot:
         manual: bool | None = None,
         defaults: bool | None = None,
         infer: bool | None = None,
+        minimal_diffs: bool | None = None,
+        write_delay: float | None = None,
         root: "Snapshot | None" = None,
     ) -> None:
         self._instance = instance
@@ -488,6 +520,8 @@ class Snapshot:
                 defaults=False if defaults is None else defaults,
                 infer=False if infer is None else infer,
                 fields=fields or {},
+                minimal_diffs=minimal_diffs,
+                write_delay=write_delay,
             )
             config.type_hints = _safe_type_hints(instance.__class__)
         self._config = config
@@ -599,7 +633,7 @@ class Snapshot:
     def fields(self) -> dict[str, Any]:
         if self._config.fields is not None:
             return self._config.fields
-        return _inferred_serializer_fields(self._instance, self._config)
+        return _inferred_serializer_fields(self._instance, self._config, self.stash)
 
     @fields.setter
     def fields(self, value: dict[str, Any]) -> None:
@@ -607,14 +641,14 @@ class Snapshot:
 
     @property
     def data(self) -> dict[str, Any]:
-        return _to_data(self._instance, self._config)
+        return _to_data(self._instance, self._config, stash=self.stash)
 
     @property
     def text(self) -> str:
         data = self.data
         if not data:
             return ""
-        return _dump_data(self.path or Path(""), data, self._config)
+        return _dump_data(self.path or Path(""), data, self._config, self.stash)
 
     @text.setter
     def text(self, value: str) -> None:
@@ -622,7 +656,11 @@ class Snapshot:
         path = self._require_path()
         with _write_lock_for(path):
             self._check_write_conflict(path)
-            _write_text_atomic(path, value)
+            _write_text_atomic(
+                path,
+                value,
+                write_delay=_effective_write_delay(self._config, self.stash),
+            )
         self.load()
 
     def save(
@@ -638,11 +676,20 @@ class Snapshot:
         with _write_lock_for(current_path):
             self._check_write_conflict(current_path)
             sidecar.reconcile_before_save(self._instance, current_path)
-            data = _to_data(self._instance, self._config, include_default_values)
+            data = _to_data(
+                self._instance,
+                self._config,
+                include_default_values,
+                stash=self.stash,
+            )
             template = self._loaded_data if self._loaded_path == current_path else None
             rendered_data = _data_for_dump(template, data)
-            text = _dump_data(current_path, rendered_data, self._config)
-            _write_text_atomic(current_path, text)
+            text = _dump_data(current_path, rendered_data, self._config, self.stash)
+            _write_text_atomic(
+                current_path,
+                text,
+                write_delay=_effective_write_delay(self._config, self.stash),
+            )
         self._loaded_data = rendered_data
         self._loaded_path = current_path
         self._last_text = text
@@ -660,7 +707,7 @@ class Snapshot:
         current_path = self._require_path()
         text = current_path.read_text(encoding="utf-8")
         try:
-            data = _load_data(current_path, text, self._config)
+            data = _load_data(current_path, text, self._config, self.stash)
         except Exception as exc:
             raise SnapclassError(f"Failed to load {current_path}: {exc}") from exc
         object.__setattr__(self._instance, "_snapclass_loading", True)
@@ -881,7 +928,13 @@ def _coerce_tracked_container_in_place(container: TrackedList | TrackedDict, sna
     hint = _hint_for_tracked_value(snapshot._instance, container, None, set())
     if hint is None:
         return
-    coerced = _coerce_for_preserialization(container, hint, "value")
+    coerced = _coerce_for_preserialization(
+        container,
+        hint,
+        "value",
+        snapshot.stash,
+        _effective_minimal_diffs(snapshot._config, snapshot.stash),
+    )
     if isinstance(container, TrackedList) and isinstance(coerced, list):
         items = list(coerced)
         list.clear(container)
@@ -965,11 +1018,18 @@ def _wrap_mutables(instance: object) -> None:
             _wrap_dataclass_mutables(value, snapshot, set())
 
 
-def _to_data(instance: object, config: Config, include_default_values: bool | None = None) -> dict[str, Any]:
+def _to_data(
+    instance: object,
+    config: Config,
+    include_default_values: bool | None = None,
+    *,
+    stash: Stash | None = None,
+) -> dict[str, Any]:
     include_defaults = config.defaults if include_default_values is None else include_default_values
+    minimal_diffs = _effective_minimal_diffs(config, stash)
     data: dict[str, Any] = {}
     if config.unknown == "preserve":
-        data.update(_preserved_unknown_data(instance))
+        data.update(_preserved_unknown_data(instance, minimal_diffs))
     pattern = config.pattern or ""
     for field in dataclasses.fields(instance):
         if not field.init or _placeholder_for(field.name) in pattern:
@@ -983,16 +1043,24 @@ def _to_data(instance: object, config: Config, include_default_values: bool | No
             field, _default_cache_for(instance)
         ):
             continue
-        serializer = _field_serializer(config, field.name)
+        serializer = _field_serializer(config, field.name, stash)
         if serializer is not None:
-            data[field.name] = _to_preserialization_value(serializer, value, instance)
+            data[field.name] = _to_preserialization_value(
+                serializer,
+                value,
+                instance,
+                minimal_diffs=minimal_diffs,
+            )
         else:
             data[field.name] = _plain(
                 _coerce_for_preserialization(
                     value,
                     config.type_hints.get(field.name),
                     field.name,
-                )
+                    stash,
+                    minimal_diffs,
+                ),
+                minimal_diffs,
             )
     if config.infer:
         for name in _inferred_attr_names(instance):
@@ -1000,21 +1068,27 @@ def _to_data(instance: object, config: Config, include_default_values: bool | No
                 continue
             value = getattr(instance, name, Missing)
             if not _is_missing(value):
-                data[name] = _plain(value)
+                data[name] = _plain(value, minimal_diffs)
     return data
 
 
-def _plain(value: Any) -> Any:
+def _plain(value: Any, minimal_diffs: bool | None = None) -> Any:
+    if minimal_diffs is None:
+        minimal_diffs = sessions.MINIMAL_DIFFS
     if isinstance(value, (TrackedList, list)):
-        if not value and sessions.MINIMAL_DIFFS:
+        if not value and minimal_diffs:
             return [None]
-        return [_plain(item) for item in value]
+        return [_plain(item, minimal_diffs) for item in value]
     if isinstance(value, (TrackedDict, dict)):
-        return {key: _plain(item) for key, item in value.items()}
+        return {key: _plain(item, minimal_diffs) for key, item in value.items()}
     if isinstance(value, (set, frozenset)):
-        return [_plain(item) for item in sorted(value, key=_sort_key)]
+        return [_plain(item, minimal_diffs) for item in sorted(value, key=_sort_key)]
     if dataclasses.is_dataclass(value):
-        return {f.name: _plain(getattr(value, f.name)) for f in dataclasses.fields(value) if f.init}
+        return {
+            f.name: _plain(getattr(value, f.name), minimal_diffs)
+            for f in dataclasses.fields(value)
+            if f.init
+        }
     if isinstance(value, enum.Enum):
         return value.value
     if isinstance(value, _datetime.datetime):
@@ -1026,27 +1100,51 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _coerce_for_preserialization(value: Any, hint: Any, field_path: str) -> Any:
+def _coerce_for_preserialization(
+    value: Any,
+    hint: Any,
+    field_path: str,
+    stash: Stash | None = None,
+    minimal_diffs: bool | None = None,
+) -> Any:
     hint = _normalize_string_hint(hint)
     origin = get_origin(hint)
     args = get_args(hint)
     if value is None:
-        return _coerce(value, hint, field_path)
+        return _coerce(value, hint, field_path, stash)
     if origin in (Union, types.UnionType):
         non_none = [arg for arg in args if arg is not type(None)]
         if len(non_none) == 1:
-            return _coerce_for_preserialization(value, non_none[0], field_path)
-        return _coerce(value, hint, field_path)
+            return _coerce_for_preserialization(
+                value,
+                non_none[0],
+                field_path,
+                stash,
+                minimal_diffs,
+            )
+        return _coerce(value, hint, field_path, stash)
     if origin is list:
         subtype = args[0] if args else Any
         return [
-            _coerce_for_preserialization(item, subtype, f"{field_path}[{index}]")
+            _coerce_for_preserialization(
+                item,
+                subtype,
+                f"{field_path}[{index}]",
+                stash,
+                minimal_diffs,
+            )
             for index, item in enumerate(_list_values(value))
         ]
     if origin in (set, frozenset, AbstractSet):
         subtype = args[0] if args else Any
         values = {
-            _coerce_for_preserialization(item, subtype, f"{field_path}[{index}]")
+            _coerce_for_preserialization(
+                item,
+                subtype,
+                f"{field_path}[{index}]",
+                stash,
+                minimal_diffs,
+            )
             for index, item in enumerate(value)
         }
         return frozenset(values) if origin is frozenset else values
@@ -1054,8 +1152,20 @@ def _coerce_for_preserialization(value: Any, hint: Any, field_path: str) -> Any:
         key_type = args[0] if args else Any
         value_type = args[1] if len(args) > 1 else Any
         return {
-            _coerce_for_preserialization(key, key_type, f"{field_path}.<key>"):
-            _coerce_for_preserialization(item, value_type, f"{field_path}[{key!r}]")
+            _coerce_for_preserialization(
+                key,
+                key_type,
+                f"{field_path}.<key>",
+                stash,
+                minimal_diffs,
+            ):
+            _coerce_for_preserialization(
+                item,
+                value_type,
+                f"{field_path}[{key!r}]",
+                stash,
+                minimal_diffs,
+            )
             for key, item in dict(value).items()
         }
     if dataclasses.is_dataclass(hint) and dataclasses.is_dataclass(value):
@@ -1065,14 +1175,24 @@ def _coerce_for_preserialization(value: Any, hint: Any, field_path: str) -> Any:
                 getattr(value, field.name),
                 nested_hints.get(field.name),
                 f"{field_path}.{field.name}",
+                stash,
+                minimal_diffs,
             )
             for field in dataclasses.fields(value)
             if field.init
         }
-    serializer = serializers.serializer_for_hint(hint)
+    serializer = serializers.serializer_for_hint(
+        hint,
+        serializers=_effective_serializers(stash),
+    )
     if serializer is not None:
-        return _to_preserialization_value(serializer, value, None)
-    return _coerce(value, hint, field_path)
+        return _to_preserialization_value(
+            serializer,
+            value,
+            None,
+            minimal_diffs=minimal_diffs,
+        )
+    return _coerce(value, hint, field_path, stash)
 
 
 def _infer_hint(value: Any) -> Any:
@@ -1100,8 +1220,42 @@ def _infer_homogeneous_hint(values: list[Any]) -> Any:
     return None
 
 
-def _load_data(path: Path, text: str, config: Config) -> dict[str, Any]:
-    formatter = formatters.formatter_for(path, config.formatter)
+def _effective_formatters(stash: Stash | None) -> dict[str, type[FileFormatter]]:
+    return stash.effective_formatters() if stash is not None else {}
+
+
+def _effective_serializers(
+    stash: Stash | None,
+) -> dict[type | str, type[serializers.Serializer]]:
+    return stash.effective_serializers() if stash is not None else {}
+
+
+def _effective_minimal_diffs(config: Config | None, stash: Stash | None) -> bool:
+    if config is not None and config.minimal_diffs is not None:
+        return config.minimal_diffs
+    if stash is not None:
+        value = stash.effective_minimal_diffs()
+        if value is not None:
+            return value
+    return sessions.MINIMAL_DIFFS
+
+
+def _effective_write_delay(config: Config | None, stash: Stash | None) -> float:
+    if config is not None and config.write_delay is not None:
+        return config.write_delay
+    if stash is not None:
+        value = stash.effective_write_delay()
+        if value is not None:
+            return value
+    return sessions.WRITE_DELAY
+
+
+def _load_data(path: Path, text: str, config: Config, stash: Stash | None) -> dict[str, Any]:
+    formatter = formatters.formatter_for(
+        path,
+        config.formatter,
+        formatters=_effective_formatters(stash),
+    )
     loads_path = getattr(formatter, "loads_path", None)
     if loads_path is not None:
         data = loads_path(path, text)
@@ -1153,8 +1307,17 @@ def _call_migrate(
         return migrate(data, path=path)
 
 
-def _dump_data(path: Path, data: dict[str, Any], config: Config) -> str:
-    return formatters.formatter_for(path, config.formatter).dumps(data)
+def _dump_data(
+    path: Path,
+    data: dict[str, Any],
+    config: Config,
+    stash: Stash | None,
+) -> str:
+    return formatters.formatter_for(
+        path,
+        config.formatter,
+        formatters=_effective_formatters(stash),
+    ).dumps(data)
 
 
 def _data_for_dump(template: dict[str, Any] | None, data: dict[str, Any]) -> dict[str, Any]:
@@ -1218,13 +1381,16 @@ def _validate_extras_field(cls: type, unknown: str, extras_field: str | None) ->
         )
 
 
-def _preserved_unknown_data(instance: object) -> dict[str, Any]:
+def _preserved_unknown_data(
+    instance: object,
+    minimal_diffs: bool | None = None,
+) -> dict[str, Any]:
     data = getattr(instance, _UNKNOWN_DATA_ATTR, {})
     if not isinstance(data, dict):
         return {}
     known_fields = {field.name for field in dataclasses.fields(instance)}
     return {
-        key: _plain(value)
+        key: _plain(value, minimal_diffs)
         for key, value in data.items()
         if key not in known_fields
     }
@@ -1308,6 +1474,8 @@ def _apply_data(
     instance: object, data: dict[str, Any], *, preserve_non_default: bool
 ) -> None:
     config = _config_for_instance(instance)
+    snapshot = getattr(instance, "snapshot", None)
+    stash = snapshot.stash if snapshot is not None else config.stash
     hints = config.type_hints
     data = _prepare_data_with_unknowns(instance, data, config)
     for field in dataclasses.fields(instance):
@@ -1322,7 +1490,7 @@ def _apply_data(
             and current != _field_default(field, _default_cache_for(instance))
         ):
             continue
-        serializer = _field_serializer(config, field.name)
+        serializer = _field_serializer(config, field.name, stash)
         if serializer is not None:
             try:
                 if isinstance(serializer, type) and issubclass(
@@ -1336,12 +1504,16 @@ def _apply_data(
             except Exception as exc:
                 raise _CoercionError(field.name, serializer, data[field.name], exc) from exc
         else:
-            value = _coerce(data[field.name], hints.get(field.name), field.name)
+            value = _coerce(data[field.name], hints.get(field.name), field.name, stash)
         object.__setattr__(instance, field.name, value)
-    _fill_missing_init_fields(instance, config)
+    _fill_missing_init_fields(instance, config, stash)
 
 
-def _fill_missing_init_fields(instance: object, config: Config) -> None:
+def _fill_missing_init_fields(
+    instance: object,
+    config: Config,
+    stash: Stash | None = None,
+) -> None:
     hints = config.type_hints
     pattern = config.pattern or ""
     for field in dataclasses.fields(instance):
@@ -1353,7 +1525,7 @@ def _fill_missing_init_fields(instance: object, config: Config) -> None:
             continue
         default = _field_default(field, _default_cache_for(instance))
         if _is_missing(default):
-            default = _missing_value_for_hint(hints.get(field.name), field.name)
+            default = _missing_value_for_hint(hints.get(field.name), field.name, stash)
         if not _is_missing(default):
             object.__setattr__(instance, field.name, default)
 
@@ -1365,35 +1537,44 @@ def _config_for_instance(instance: object) -> Config:
     return instance.__class__.__snapclass_config__
 
 
-def _field_serializer(config: Config, name: str) -> type[serializers.Serializer] | None:
+def _field_serializer(
+    config: Config,
+    name: str,
+    stash: Stash | None = None,
+) -> type[serializers.Serializer] | None:
     if config.fields and name in config.fields:
         return config.fields[name]
-    return serializers.serializer_for_hint(config.type_hints.get(name))
+    return serializers.serializer_for_hint(
+        config.type_hints.get(name),
+        serializers=_effective_serializers(stash),
+    )
 
 
-def _inferred_serializer_fields(instance: object, config: Config) -> dict[str, Any]:
+def _inferred_serializer_fields(
+    instance: object,
+    config: Config,
+    stash: Stash | None = None,
+) -> dict[str, Any]:
     pattern = config.pattern or ""
     fields: dict[str, Any] = {}
     for field in dataclasses.fields(instance):
         if not field.init or _placeholder_for(field.name) in pattern:
             continue
-        serializer = _attr_serializer_for_hint(config.type_hints.get(field.name))
+        serializer = _attr_serializer_for_hint(config.type_hints.get(field.name), stash)
         if serializer is not None:
             fields[field.name] = serializer
     return fields
 
 
-def _attr_serializer_for_hint(hint: Any) -> type[serializers.Serializer] | None:
+def _attr_serializer_for_hint(
+    hint: Any,
+    stash: Stash | None = None,
+) -> type[serializers.Serializer] | None:
     hint = _normalize_string_hint(hint)
-    if hint is bool:
-        return serializers.Boolean
-    if hint is int:
-        return serializers.Integer
-    if hint is float:
-        return serializers.Float
-    if hint is str:
-        return serializers.String
-    return serializers.serializer_for_hint(hint)
+    return serializers.serializer_for_hint(
+        hint,
+        serializers=_effective_serializers(stash),
+    )
 
 
 def _normalize_string_hint(hint: Any) -> Any:
@@ -1417,24 +1598,46 @@ def _to_python_value(serializer: Any, value: Any, target_object: Any) -> Any:
     return _call_serializer(method, value, target_object)
 
 
-def _to_preserialization_value(serializer: Any, value: Any, target_object: Any) -> Any:
+def _to_preserialization_value(
+    serializer: Any,
+    value: Any,
+    target_object: Any,
+    *,
+    minimal_diffs: bool | None = None,
+) -> Any:
     method = serializer.to_preserialization_data
-    return _call_serializer(method, value, target_object)
+    return _call_serializer(
+        method,
+        value,
+        target_object,
+        minimal_diffs=minimal_diffs,
+    )
 
 
-def _call_serializer(method: Any, value: Any, target_object: Any) -> Any:
+def _call_serializer(method: Any, value: Any, target_object: Any, **kwargs: Any) -> Any:
     parameters = inspect.signature(method).parameters
+    optional_kwargs = {
+        name: value
+        for name, value in kwargs.items()
+        if value is not None and name in parameters
+    }
     if any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     ):
-        return method(value, target_object=target_object)
+        extra_kwargs = {key: item for key, item in kwargs.items() if item is not None}
+        return method(value, target_object=target_object, **extra_kwargs)
     if "target_object" in parameters:
-        return method(value, target_object=target_object)
-    return method(value)
+        return method(value, target_object=target_object, **optional_kwargs)
+    return method(value, **optional_kwargs)
 
 
-def _coerce(value: Any, hint: Any, field_path: str = "value") -> Any:
+def _coerce(
+    value: Any,
+    hint: Any,
+    field_path: str = "value",
+    stash: Stash | None = None,
+) -> Any:
     hint = _normalize_string_hint(hint)
     origin = get_origin(hint)
     args = get_args(hint)
@@ -1455,19 +1658,19 @@ def _coerce(value: Any, hint: Any, field_path: str = "value") -> Any:
     if origin in (Union, types.UnionType):
         non_none = [arg for arg in args if arg is not type(None)]
         if len(non_none) == 1:
-            return _coerce(value, non_none[0], field_path)
-        return _coerce_union(value, non_none, field_path)
+            return _coerce(value, non_none[0], field_path, stash)
+        return _coerce_union(value, non_none, field_path, stash)
     if origin is list:
         subtype = args[0] if args else Any
         value = _list_values(value)
         return [
-            _coerce(item, subtype, f"{field_path}[{index}]")
+            _coerce(item, subtype, f"{field_path}[{index}]", stash)
             for index, item in enumerate(value)
         ]
     if origin in (set, frozenset, AbstractSet):
         subtype = args[0] if args else Any
         values = {
-            _coerce(item, subtype, f"{field_path}[{index}]")
+            _coerce(item, subtype, f"{field_path}[{index}]", stash)
             for index, item in enumerate(value)
         }
         return frozenset(values) if origin is frozenset else values
@@ -1475,12 +1678,15 @@ def _coerce(value: Any, hint: Any, field_path: str = "value") -> Any:
         key_type = args[0] if args else Any
         value_type = args[1] if len(args) > 1 else Any
         return {
-            _coerce(key, key_type, f"{field_path}.<key>"): _coerce(
-                item, value_type, f"{field_path}[{key!r}]"
+            _coerce(key, key_type, f"{field_path}.<key>", stash): _coerce(
+                item, value_type, f"{field_path}[{key!r}]", stash
             )
             for key, item in dict(value).items()
         }
-    serializer = serializers.serializer_for_hint(hint)
+    serializer = serializers.serializer_for_hint(
+        hint,
+        serializers=_effective_serializers(stash),
+    )
     if serializer is not None:
         try:
             return _to_python_value(serializer, value, None)
@@ -1494,7 +1700,7 @@ def _coerce(value: Any, hint: Any, field_path: str = "value") -> Any:
         )
         return _convert_or_raise(lambda: dict(value), field_path, hint, value)
     if dataclasses.is_dataclass(hint) and isinstance(value, dict):
-        return _coerce_dataclass_mapping(hint, value, field_path)
+        return _coerce_dataclass_mapping(hint, value, field_path, stash)
     if isinstance(hint, type) and issubclass(hint, enum.Enum):
         if isinstance(value, hint):
             return value
@@ -1560,14 +1766,19 @@ def _received_name(value: Any) -> str:
     return type(value).__name__
 
 
-def _coerce_union(value: Any, hints: list[Any], field_path: str) -> Any:
+def _coerce_union(
+    value: Any,
+    hints: list[Any],
+    field_path: str,
+    stash: Stash | None = None,
+) -> Any:
     for hint in hints:
         if _matches_hint(value, hint):
             return value
     errors: list[Exception] = []
     for hint in hints:
         try:
-            return _coerce(value, hint, field_path)
+            return _coerce(value, hint, field_path, stash)
         except Exception as exc:
             errors.append(exc)
     if errors:
@@ -1597,7 +1808,12 @@ def _matches_hint(value: Any, hint: Any) -> bool:
     return False
 
 
-def _coerce_dataclass_mapping(hint: type, value: dict[str, Any], field_path: str) -> Any:
+def _coerce_dataclass_mapping(
+    hint: type,
+    value: dict[str, Any],
+    field_path: str,
+    stash: Stash | None = None,
+) -> Any:
     nested_hints = _dataclass_type_hints(hint)
     kwargs: dict[str, Any] = {}
     for field in dataclasses.fields(hint):
@@ -1606,17 +1822,21 @@ def _coerce_dataclass_mapping(hint: type, value: dict[str, Any], field_path: str
         child_path = f"{field_path}.{field.name}"
         child_hint = nested_hints.get(field.name)
         if field.name in value:
-            kwargs[field.name] = _coerce(value[field.name], child_hint, child_path)
+            kwargs[field.name] = _coerce(value[field.name], child_hint, child_path, stash)
             continue
         default = _field_default(field)
         if _is_missing(default):
-            default = _missing_value_for_hint(child_hint, child_path)
+            default = _missing_value_for_hint(child_hint, child_path, stash)
         if not _is_missing(default):
             kwargs[field.name] = default
     return hint(**kwargs)
 
 
-def _missing_value_for_hint(hint: Any, field_path: str) -> Any:
+def _missing_value_for_hint(
+    hint: Any,
+    field_path: str,
+    stash: Stash | None = None,
+) -> Any:
     hint = _normalize_string_hint(hint)
     origin = get_origin(hint)
     args = get_args(hint)
@@ -1625,7 +1845,7 @@ def _missing_value_for_hint(hint: Any, field_path: str) -> Any:
     if origin in (Union, types.UnionType):
         non_none = [arg for arg in args if arg is not type(None)]
         if len(non_none) == 1:
-            return _missing_value_for_hint(non_none[0], field_path)
+            return _missing_value_for_hint(non_none[0], field_path, stash)
         return Missing
     if origin is list:
         return []
@@ -1635,12 +1855,12 @@ def _missing_value_for_hint(hint: Any, field_path: str) -> Any:
         return frozenset()
     if origin in (dict, Mapping, MutableMapping):
         return {}
-    serializer = _attr_serializer_for_hint(hint)
+    serializer = _attr_serializer_for_hint(hint, stash)
     if serializer is not None and getattr(serializer, "DEFAULT", None) is not None:
         return _to_python_value(serializer, None, None)
     if dataclasses.is_dataclass(hint):
         return _convert_or_raise(
-            lambda: _coerce_dataclass_mapping(hint, {}, field_path),
+            lambda: _coerce_dataclass_mapping(hint, {}, field_path, stash),
             field_path,
             hint,
             {},
@@ -1914,7 +2134,7 @@ def _module_dir_for(cls: type) -> Path | None:
     return Path(filename).resolve().parent
 
 
-def _write_text_atomic(path: Path, text: str) -> None:
+def _write_text_atomic(path: Path, text: str, *, write_delay: float | None = None) -> None:
     with _write_lock_for(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(
@@ -1925,8 +2145,10 @@ def _write_text_atomic(path: Path, text: str) -> None:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                 handle.write(text)
             _replace_path_atomic(temp_path, path)
-            if sessions.WRITE_DELAY:
-                time.sleep(sessions.WRITE_DELAY)
+            if write_delay is None:
+                write_delay = sessions.WRITE_DELAY
+            if write_delay:
+                time.sleep(write_delay)
         except Exception:
             try:
                 temp_path.unlink(missing_ok=True)

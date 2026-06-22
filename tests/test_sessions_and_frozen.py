@@ -250,6 +250,54 @@ def test_minimal_diffs_can_be_disabled_for_semantic_empty_lists(tmp_path):
     assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "tags: []\n"
 
 
+def test_stash_minimal_diffs_is_scoped_to_that_stash(tmp_path):
+    friendly_stash = Stash(tmp_path / "friendly", minimal_diffs=True)
+    semantic_stash = Stash(tmp_path / "semantic", minimal_diffs=False)
+
+    @snapclass("{self.name}.yml", stash=friendly_stash, manual=True, defaults=True)
+    class FriendlyItem:
+        name: str
+        tags: list[str] = field(default_factory=list)
+
+    @snapclass("{self.name}.yml", stash=semantic_stash, manual=True, defaults=True)
+    class SemanticItem:
+        name: str
+        tags: list[str] = field(default_factory=list)
+
+    previous = sessions.MINIMAL_DIFFS
+    sessions.MINIMAL_DIFFS = False
+    try:
+        FriendlyItem("a").snapshot.save()
+        SemanticItem("a").snapshot.save()
+    finally:
+        sessions.MINIMAL_DIFFS = previous
+
+    assert (tmp_path / "friendly" / "a.yml").read_text(encoding="utf-8") == (
+        "tags:\n"
+        "  -\n"
+    )
+    assert (tmp_path / "semantic" / "a.yml").read_text(encoding="utf-8") == "tags: []\n"
+
+
+def test_model_minimal_diffs_beats_stash_policy(tmp_path):
+    stash = Stash(tmp_path, minimal_diffs=True)
+
+    @snapclass(
+        "{self.name}.yml",
+        stash=stash,
+        manual=True,
+        defaults=True,
+        minimal_diffs=False,
+    )
+    class Item:
+        name: str
+        tags: list[str] = field(default_factory=list)
+
+    Item("a").snapshot.save()
+
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "tags: []\n"
+
+
 def test_minimal_diffs_applies_before_format_specific_rendering(tmp_path):
     @snapclass("{self.name}.json", stash=Stash(tmp_path), manual=True, defaults=True)
     class Item:
@@ -281,6 +329,52 @@ def test_write_delay_sleeps_after_snapshot_save(tmp_path, monkeypatch):
 
     assert sleeps == [0.125]
     assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "value: one\n"
+
+
+def test_stash_write_delay_is_scoped_to_that_stash(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(schemas.time, "sleep", sleeps.append)
+
+    slow_stash = Stash(tmp_path / "slow", write_delay=0.25)
+    fast_stash = Stash(tmp_path / "fast", write_delay=0.0)
+
+    @snapclass("{self.name}.yml", stash=slow_stash, manual=True)
+    class SlowItem:
+        name: str
+        value: str = ""
+
+    @snapclass("{self.name}.yml", stash=fast_stash, manual=True)
+    class FastItem:
+        name: str
+        value: str = ""
+
+    previous = sessions.WRITE_DELAY
+    sessions.WRITE_DELAY = 0.5
+    try:
+        SlowItem("a", "one").snapshot.save()
+        FastItem("a", "two").snapshot.save()
+    finally:
+        sessions.WRITE_DELAY = previous
+
+    assert sleeps == [0.25]
+    assert (tmp_path / "slow" / "a.yml").read_text(encoding="utf-8") == "value: one\n"
+    assert (tmp_path / "fast" / "a.yml").read_text(encoding="utf-8") == "value: two\n"
+
+
+def test_model_write_delay_beats_stash_policy(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(schemas.time, "sleep", sleeps.append)
+
+    stash = Stash(tmp_path, write_delay=0.5)
+
+    @snapclass("{self.name}.yml", stash=stash, manual=True, write_delay=0.125)
+    class Item:
+        name: str
+        value: str = ""
+
+    Item("a", "one").snapshot.save()
+
+    assert sleeps == [0.125]
 
 
 def test_default_write_delay_does_not_sleep(tmp_path, monkeypatch):

@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from snapclass import Stash, snapclass
+from snapclass import Stash, serializers, snapclass
+from snapclass import formatters
+from snapclass.formatters import FileFormatter
 
 
 def test_bind_propagates_to_parent_stashes(tmp_path):
@@ -356,3 +358,448 @@ def test_windows_unc_stash_round_trips_network_root():
     assert network.path == Path(r"\\server\share\snapclass")
     assert network.path.drive == r"\\server\share"
     assert network.is_external is True
+
+
+def test_stash_local_formatters_isolate_same_extension_between_libraries(tmp_path):
+    class UpperFormatter(FileFormatter):
+        extensions = {".yml"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"message": text.strip().lower()}
+
+        @classmethod
+        def dumps(cls, data):
+            return data["message"].upper() + "\n"
+
+    class WrappedFormatter(FileFormatter):
+        extensions = {".yml"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"message": text.strip("[]\n")}
+
+        @classmethod
+        def dumps(cls, data):
+            return f"[{data['message']}]\n"
+
+    first = Stash(tmp_path / "first", formatters={".yml": UpperFormatter})
+    second = Stash(tmp_path / "second", formatters={".yml": WrappedFormatter})
+
+    @snapclass("{self.name}.yml", stash=first, manual=True)
+    class FirstPrompt:
+        name: str
+        message: str
+
+    @snapclass("{self.name}.yml", stash=second, manual=True)
+    class SecondPrompt:
+        name: str
+        message: str
+
+    FirstPrompt("a", "hello").snapshot.save()
+    SecondPrompt("a", "hello").snapshot.save()
+
+    assert (tmp_path / "first" / "a.yml").read_text(encoding="utf-8") == "HELLO\n"
+    assert (tmp_path / "second" / "a.yml").read_text(encoding="utf-8") == "[hello]\n"
+    assert FirstPrompt.snapshots.get("a").message == "hello"
+    assert SecondPrompt.snapshots.get("a").message == "hello"
+
+
+def test_downstream_formatter_situations_coexist_without_global_registration(tmp_path):
+    class ChatsnackYaml(formatters.Formatter):
+        @classmethod
+        def extensions(cls):
+            return {"", ".yml", ".yaml"}
+
+        @classmethod
+        def deserialize(cls, file_object):
+            data = formatters.YAML.deserialize(file_object)
+            messages = []
+            for message in data.get("messages", []):
+                if isinstance(message, dict) and len(message) == 1:
+                    role, content = next(iter(message.items()))
+                    messages.append({"system" if role == "developer" else role: content})
+                else:
+                    messages.append(message)
+            data["messages"] = messages
+            return data
+
+        @classmethod
+        def serialize(cls, data):
+            def without_none(value):
+                if isinstance(value, dict):
+                    return {
+                        key: without_none(item)
+                        for key, item in value.items()
+                        if item is not None
+                    }
+                if isinstance(value, list):
+                    return [without_none(item) for item in value]
+                return value
+
+            return formatters.YAML.serialize(without_none(data))
+
+    class ChatsnackTxt(formatters.Formatter):
+        @classmethod
+        def extensions(cls):
+            return {".txt"}
+
+        @classmethod
+        def serialize(cls, data):
+            return "".join(value for value in data.values() if isinstance(value, str))
+
+        @classmethod
+        def deserialize(cls, file_object):
+            with open(file_object.name, encoding="utf-8") as handle:
+                return {"content": handle.read()}
+
+    class PlunkylibTxt(formatters.Formatter):
+        type_format = "{name}|{type}"
+        divider = "#-=-=-=-=-DO-NOT-EDIT-THIS-LINE-PLEASE-=-=-=-=-#"
+        types_by_name = {"str": str, "int": int, "float": float}
+
+        @classmethod
+        def extensions(cls):
+            return {".txt"}
+
+        @classmethod
+        def serialize(cls, data):
+            sections = []
+            for key, value in data.items():
+                if type(value) not in {str, int, float}:
+                    raise ValueError(f"Unsupported type: {type(value)}")
+                sections.append(
+                    f"{cls.type_format.format(name=key, type=type(value).__name__)}\n"
+                    f"{value}\n"
+                    f"{cls.divider}\n"
+                )
+            return "".join(sections)
+
+        @classmethod
+        def deserialize(cls, file_object):
+            output = {}
+            current_key = ""
+            current_type = None
+            current_value = None
+            for line in file_object.readlines():
+                current_line = line.rstrip("\n")
+                if current_line == cls.divider:
+                    output[current_key] = current_type(current_value)
+                    current_key = ""
+                    current_type = None
+                    current_value = None
+                    continue
+                if current_key == "":
+                    current_key, type_name = current_line.split("|")
+                    current_type = cls.types_by_name[type_name.strip()]
+                    current_key = current_key.strip()
+                    continue
+                current_value = (
+                    current_line
+                    if current_value is None
+                    else current_value + "\n" + current_line
+                )
+            return output
+
+    chatsnack_root = Stash(
+        tmp_path / "chatsnack",
+        formatters={".yml": ChatsnackYaml, ".txt": ChatsnackTxt},
+    )
+    plunkylib_root = Stash(
+        tmp_path / "plunkylib",
+        formatters={".txt": PlunkylibTxt},
+    )
+    lorebubble_root = Stash(tmp_path / "lorebubble")
+
+    @snapclass("{self.name}.yml", stash=chatsnack_root, manual=True, defaults=True)
+    class Chat:
+        name: str
+        params: dict = field(default_factory=dict)
+        messages: list[dict] = field(default_factory=list)
+
+    @snapclass("{self.name}.txt", stash=chatsnack_root, manual=True)
+    class RawPrompt:
+        name: str
+        content: str
+
+    @snapclass("{self.name}.txt", stash=plunkylib_root, manual=True)
+    class PromptVars:
+        name: str
+        prompt: str
+        count: int
+        temperature: float
+
+    @snapclass("{self.name}.yml", stash=lorebubble_root, manual=True, defaults=True)
+    class LoreArticle:
+        name: str
+        summary: str | None = None
+
+    Chat(
+        "Popsicle",
+        params={"model": "gpt-5-chat-latest", "responses": {"state": None}},
+        messages=[{"developer": "Follow house style."}, {"assistant": None}],
+    ).snapshot.save()
+    RawPrompt("System", "Answer carefully.\n").snapshot.save()
+    PromptVars("Care", "Answer {question}", 2, 0.7).snapshot.save()
+    LoreArticle("DuskCourt").snapshot.save()
+
+    chat_yaml = (tmp_path / "chatsnack" / "Popsicle.yml").read_text(encoding="utf-8")
+    raw_prompt = (tmp_path / "chatsnack" / "System.txt").read_text(encoding="utf-8")
+    plunky_prompt = (tmp_path / "plunkylib" / "Care.txt").read_text(encoding="utf-8")
+    lore_yaml = (tmp_path / "lorebubble" / "DuskCourt.yml").read_text(encoding="utf-8")
+
+    assert "state:" not in chat_yaml
+    assert "assistant:" not in chat_yaml
+    assert "developer:" in chat_yaml
+    assert raw_prompt == "Answer carefully.\n"
+    assert "prompt|str\nAnswer {question}\n" in plunky_prompt
+    assert "count|int\n2\n" in plunky_prompt
+    assert "temperature|float\n0.7\n" in plunky_prompt
+    assert "summary:" in lore_yaml
+
+    (tmp_path / "chatsnack" / "Popsicle.yml").write_text(
+        "messages:\n"
+        "  - developer: Follow edited style.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "plunkylib" / "Care.txt").write_text(
+        "prompt|str\n"
+        "Edited {question}\n"
+        f"{PlunkylibTxt.divider}\n"
+        "count|int\n"
+        "3\n"
+        f"{PlunkylibTxt.divider}\n"
+        "temperature|float\n"
+        "0.9\n"
+        f"{PlunkylibTxt.divider}\n",
+        encoding="utf-8",
+    )
+
+    assert Chat.snapshots.get("Popsicle").messages == [
+        {"system": "Follow edited style."}
+    ]
+    loaded_vars = PromptVars.snapshots.get("Care")
+    assert loaded_vars.prompt == "Edited {question}"
+    assert loaded_vars.count == 3
+    assert loaded_vars.temperature == 0.9
+
+
+def test_child_stash_inherits_formatter_policy_and_child_extension_override_wins(tmp_path):
+    class PipeFormatter(FileFormatter):
+        extensions = {".pipe"}
+
+        @classmethod
+        def loads(cls, text: str):
+            key, value = text.strip().split("|", 1)
+            return {key: value}
+
+        @classmethod
+        def dumps(cls, data):
+            return "".join(f"{key}|{value}\n" for key, value in data.items())
+
+    class ParentYamlFormatter(FileFormatter):
+        extensions = {".yml"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"message": text.strip().removeprefix("parent:")}
+
+        @classmethod
+        def dumps(cls, data):
+            return f"parent:{data['message']}\n"
+
+    class ChildYamlFormatter(FileFormatter):
+        extensions = {".yml"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"message": text.strip().removeprefix("child:")}
+
+        @classmethod
+        def dumps(cls, data):
+            return f"child:{data['message']}\n"
+
+    root = Stash(
+        tmp_path,
+        formatters={".pipe": PipeFormatter, ".yml": ParentYamlFormatter},
+    )
+    child = root / Stash("child", formatters={".yml": ChildYamlFormatter})
+
+    @snapclass("{self.name}.pipe", stash=child, manual=True)
+    class Inherited:
+        name: str
+        text: str
+
+    @snapclass("{self.name}.yml", stash=child, manual=True)
+    class Overridden:
+        name: str
+        message: str
+
+    Inherited("a", "one").snapshot.save()
+    Overridden("b", "two").snapshot.save()
+
+    assert (tmp_path / "child" / "a.pipe").read_text(encoding="utf-8") == "text|one\n"
+    assert (tmp_path / "child" / "b.yml").read_text(encoding="utf-8") == "child:two\n"
+
+
+def test_explicit_model_formatter_beats_stash_formatter_policy(tmp_path):
+    class StashFormatter(FileFormatter):
+        extensions = {".yml"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"message": text.strip().removeprefix("stash:")}
+
+        @classmethod
+        def dumps(cls, data):
+            return f"stash:{data['message']}\n"
+
+    class ExplicitFormatter(FileFormatter):
+        extensions = {".yml"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"message": text.strip().removeprefix("explicit:")}
+
+        @classmethod
+        def dumps(cls, data):
+            return f"explicit:{data['message']}\n"
+
+    stash = Stash(tmp_path, formatters={".yml": StashFormatter})
+
+    @snapclass(
+        "{self.name}.yml",
+        stash=stash,
+        formatter=ExplicitFormatter,
+        manual=True,
+    )
+    class Prompt:
+        name: str
+        message: str
+
+    Prompt("a", "wins").snapshot.save()
+
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "explicit:wins\n"
+    assert Prompt.snapshots.get("a").message == "wins"
+
+
+def test_stash_policy_helpers_return_augmented_copies():
+    class OneFormatter(FileFormatter):
+        extensions = {".one"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"value": text}
+
+        @classmethod
+        def dumps(cls, data):
+            return data["value"]
+
+    class TwoFormatter(OneFormatter):
+        extensions = {".two"}
+
+    class Token:
+        pass
+
+    class TokenSerializer(serializers.Serializer):
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return "token"
+
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return Token()
+
+    class OtherSerializer(TokenSerializer):
+        pass
+
+    base = Stash("root")
+    updated = (
+        base.with_formatter(".one", OneFormatter)
+        .with_formatters({".two": TwoFormatter})
+        .with_serializer(Token, TokenSerializer)
+        .with_serializers({"OtherToken": OtherSerializer})
+        .with_options(minimal_diffs=False, write_delay=0.125)
+    )
+
+    assert base.effective_formatters() == {}
+    assert base.effective_serializers() == {}
+    assert base.effective_minimal_diffs() is None
+    assert base.effective_write_delay() is None
+    assert updated.effective_formatters() == {
+        ".one": OneFormatter,
+        ".two": TwoFormatter,
+    }
+    assert updated.effective_serializers()[Token] is TokenSerializer
+    assert updated.effective_serializers()["Token"] is TokenSerializer
+    assert updated.effective_serializers()["OtherToken"] is OtherSerializer
+    assert updated.effective_minimal_diffs() is False
+    assert updated.effective_write_delay() == 0.125
+
+
+def test_collection_bound_stash_uses_bound_formatter_policy(tmp_path):
+    class ScalarFormatter(FileFormatter):
+        extensions = {".yml"}
+
+        @classmethod
+        def loads(cls, text: str):
+            return {"message": text.strip()}
+
+        @classmethod
+        def dumps(cls, data):
+            return data["message"] + "\n"
+
+    default_stash = Stash(tmp_path / "default")
+    scalar_stash = Stash(tmp_path / "scalar", formatters={".yml": ScalarFormatter})
+
+    @snapclass("{self.name}.yml", stash=default_stash, manual=True)
+    class Prompt:
+        name: str
+        message: str
+
+    Prompt("a", "default").snapshot.save()
+    (tmp_path / "scalar" / "a.yml").parent.mkdir()
+    (tmp_path / "scalar" / "a.yml").write_text("bound\n", encoding="utf-8")
+
+    assert Prompt.snapshots(scalar_stash).get("a").message == "bound"
+
+
+def test_collection_bound_stash_uses_bound_serializer_policy(tmp_path):
+    class Token:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def __eq__(self, other):
+            return isinstance(other, Token) and self.value == other.value
+
+    class BoundTokenSerializer(serializers.Serializer):
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return "bound:" + value.value
+
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return Token(str(value).removeprefix("bound:"))
+
+    default_stash = Stash(tmp_path / "default")
+    bound_stash = Stash(
+        tmp_path / "bound",
+        serializers={Token: BoundTokenSerializer},
+    )
+
+    @snapclass("{self.name}.yml", stash=default_stash, manual=True)
+    class Record:
+        name: str
+        token: Token
+
+    (tmp_path / "bound").mkdir()
+    (tmp_path / "bound" / "a.yml").write_text("token: bound:loaded\n", encoding="utf-8")
+
+    record = Record.snapshots(bound_stash).get("a")
+    record.token = Token("saved")
+    record.snapshot.save()
+
+    assert record.token == Token("saved")
+    assert (tmp_path / "bound" / "a.yml").read_text(encoding="utf-8") == (
+        "token: bound:saved\n"
+    )

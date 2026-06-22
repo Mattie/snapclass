@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from io import StringIO
 from pathlib import Path
 from typing import Any, ClassVar, IO
@@ -214,50 +215,15 @@ class TOMLFormatter(FileFormatter):
         return tomlkit.dumps(data)
 
 
-_FILE_FORMATTERS: dict[str, type[FileFormatter]] = {}
-_FORMATTERS: dict[str, type[Formatter]] = {}
-
-
-def register(
-    extension: str | type[FileFormatter] | type[Formatter],
-    formatter: type[FileFormatter] | type[Formatter] | None = None,
-) -> None:
-    if formatter is None:
-        if not isinstance(extension, type):
-            raise TypeError("register(formatter) expects a formatter class")
-        _register_formatter_class(extension)
-        return
-    if not isinstance(extension, str):
-        raise TypeError("register(extension, formatter) expects a string extension")
-    _register_extension(extension, formatter)
-
-
-def _register_formatter_class(formatter: type[FileFormatter] | type[Formatter]) -> None:
-    if issubclass(formatter, FileFormatter):
-        for extension in formatter.extensions:
-            _FILE_FORMATTERS[extension] = formatter
-        return
-    if issubclass(formatter, Formatter):
-        adapter = from_formatter(formatter)
-        for extension in formatter.extensions():
-            _FORMATTERS[extension] = formatter
-            _FILE_FORMATTERS[extension] = adapter
-        return
-    raise TypeError("register(formatter) expects a Formatter subclass")
-
-
-def _register_extension(
-    extension: str,
-    formatter: type[FileFormatter] | type[Formatter],
-) -> None:
-    if issubclass(formatter, FileFormatter):
-        _FILE_FORMATTERS[extension] = formatter
-        return
-    if issubclass(formatter, Formatter):
-        _FORMATTERS[extension] = formatter
-        _FILE_FORMATTERS[extension] = from_formatter(formatter)
-        return
-    raise TypeError("register(extension, formatter) expects a Formatter subclass")
+_DEFAULT_FILE_FORMATTERS: dict[str, type[FileFormatter]] = {
+    "": YAMLFormatter,
+    ".yml": YAMLFormatter,
+    ".yaml": YAMLFormatter,
+    ".json": JSONFormatter,
+    ".json5": JSON5Formatter,
+    ".toml": TOMLFormatter,
+    ".txt": TextFormatter,
+}
 
 
 def from_formatter(formatter: type) -> type[FileFormatter]:
@@ -291,15 +257,44 @@ def from_formatter(formatter: type) -> type[FileFormatter]:
     return FormatterAdapter
 
 
-def formatter_for(path: Path, explicit: type[FileFormatter] | None = None) -> type[FileFormatter]:
+def normalize_formatters(
+    formatters: Mapping[str, type[FileFormatter] | type[Formatter]] | None,
+) -> dict[str, type[FileFormatter]]:
+    if formatters is None:
+        return {}
+    normalized: dict[str, type[FileFormatter]] = {}
+    for extension, formatter in formatters.items():
+        if not isinstance(extension, str):
+            raise TypeError("formatter extensions must be strings")
+        normalized[extension] = as_file_formatter(formatter)
+    return normalized
+
+
+def as_file_formatter(
+    formatter: type[FileFormatter] | type[Formatter],
+) -> type[FileFormatter]:
+    if not isinstance(formatter, type):
+        raise TypeError("formatter must be a formatter class")
+    if issubclass(formatter, FileFormatter):
+        return formatter
+    if issubclass(formatter, Formatter):
+        return from_formatter(formatter)
+    raise TypeError("formatter must be a Formatter subclass")
+
+
+def formatter_for(
+    path: Path,
+    explicit: type[FileFormatter] | None = None,
+    *,
+    formatters: Mapping[str, type[FileFormatter]] | None = None,
+) -> type[FileFormatter]:
     if explicit is not None:
         return explicit
     suffix = path.suffix
-    if suffix in _FILE_FORMATTERS:
-        return _FILE_FORMATTERS[suffix]
-    for formatter in FileFormatter.__subclasses__():
-        if suffix in formatter.extensions:
-            return formatter
+    if formatters is not None and suffix in formatters:
+        return formatters[suffix]
+    if suffix in _DEFAULT_FILE_FORMATTERS:
+        return _DEFAULT_FILE_FORMATTERS[suffix]
     raise ValueError(f"Unsupported file extension: {suffix!r}")
 
 
@@ -376,6 +371,16 @@ class YAML(Formatter):
         return text
 
 
+_DEFAULT_FORMATTERS: dict[str, type[Formatter]] = {
+    "": YAML,
+    ".yml": YAML,
+    ".yaml": YAML,
+    ".json": JSON,
+    ".json5": JSON5,
+    ".toml": TOML,
+}
+
+
 def deserialize(
     path: Path,
     extension: str,
@@ -398,15 +403,9 @@ def serialize(
 
 
 def _formatter_adapter_for(extension: str) -> type[Formatter]:
-    if extension in _FORMATTERS:
-        return _FORMATTERS[extension]
-    for formatter in Formatter.__subclasses__():
-        if extension in formatter.extensions():
-            return formatter
+    if extension in _DEFAULT_FORMATTERS:
+        return _DEFAULT_FORMATTERS[extension]
     raise ValueError(f"Unsupported file extension: {extension!r}")
-
-
-register(".txt", TextFormatter)
 
 
 def _plain_mapping(value: Any) -> Any:

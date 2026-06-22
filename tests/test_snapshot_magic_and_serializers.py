@@ -6,9 +6,10 @@ import os
 from pathlib import Path
 import threading
 import time
+from collections.abc import ByteString
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Dict, List, Optional, Set
 
 import pytest
 
@@ -504,6 +505,119 @@ def test_map_type_exposes_dataclass_and_enum_serializer_surface():
     assert enum_serializer.to_preserialization_data(Color.blue) == "blue"
 
 
+def test_mutable_serializers_update_existing_targets_in_place():
+    @dataclass
+    class Nested:
+        count: int
+        flag: bool = False
+
+    list_serializer = serializers.List.of_type(serializers.Integer)
+    set_serializer = serializers.Set.of_type(serializers.Integer)
+    dict_serializer = serializers.Dictionary.of_mapping(serializers.String, serializers.Integer)
+    nested_serializer = serializers.map_type(Nested)
+
+    original_list = [1, 2]
+    original_set = {1, 2}
+    original_dict = {"a": 1}
+    original_nested = Nested(1, True)
+
+    loaded_list = list_serializer.to_python_value("3, 4", target_object=original_list)
+    loaded_set = set_serializer.to_python_value("3, 4, 4", target_object=original_set)
+    loaded_dict = dict_serializer.to_python_value({"b": 2}, target_object=original_dict)
+    loaded_nested = nested_serializer.to_python_value(
+        {"count": "2", "flag": "disabled"},
+        target_object=original_nested,
+    )
+
+    assert loaded_list is original_list
+    assert loaded_list == [3, 4]
+    assert loaded_set is original_set
+    assert loaded_set == {3, 4}
+    assert loaded_dict is original_dict
+    assert loaded_dict == {"b": 2}
+    assert loaded_nested is original_nested
+    assert loaded_nested == Nested(2, False)
+
+
+def test_serializers_skip_defaults_for_persistent_diff_data():
+    @dataclass
+    class Nested:
+        count: int
+        flag: bool = False
+
+    list_serializer = serializers.List.of_type(serializers.Integer)
+    set_serializer = serializers.Set.of_type(serializers.Integer)
+    dict_serializer = serializers.Dictionary.of_mapping(serializers.String, serializers.Integer)
+    nested_serializer = serializers.map_type(Nested)
+
+    assert list_serializer.to_preserialization_data(
+        [1],
+        default_to_skip=[1],
+        minimal_diffs=True,
+    ) == [None]
+    assert list_serializer.to_preserialization_data(
+        [2],
+        default_to_skip=[1],
+        minimal_diffs=True,
+    ) == [2]
+
+    assert set_serializer.to_preserialization_data(
+        [1],
+        default_to_skip=[1],
+        minimal_diffs=True,
+    ) == [None]
+    assert set_serializer.to_preserialization_data(
+        [2],
+        default_to_skip=[1],
+        minimal_diffs=True,
+    ) == [2]
+
+    assert dict_serializer.to_preserialization_data(
+        {"a": 1},
+        default_to_skip={"a": 1},
+    ) == {}
+    assert dict_serializer.to_preserialization_data(
+        {"b": 2},
+        default_to_skip={"a": 1},
+    ) == {"b": 2}
+
+    assert nested_serializer.to_preserialization_data(
+        Nested(1),
+        default_to_skip=Nested(1),
+    ) == {}
+    assert nested_serializer.to_preserialization_data(
+        Nested(2),
+        default_to_skip=Nested(1),
+    ) == {"count": 2}
+    assert nested_serializer.to_preserialization_data(
+        Nested(1, True),
+        default_to_skip=Nested(1),
+    ) == {"flag": True}
+
+
+def test_map_type_rejects_ambiguous_and_unsupported_annotations():
+    class Plain:
+        pass
+
+    with pytest.raises(TypeError, match="Type is required with 'List' annotation"):
+        serializers.map_type(List)
+
+    with pytest.raises(TypeError, match="Type is required with 'Set' annotation"):
+        serializers.map_type(Set)
+
+    with pytest.raises(TypeError, match="Types are required with 'Dict' annotation"):
+        serializers.map_type(Dict)
+
+    with pytest.raises(TypeError, match="Could not map type"):
+        serializers.map_type(ByteString)
+
+    with pytest.raises(TypeError, match="Annotation is not a type: 'foobar'"):
+        serializers.map_type("foobar")
+
+    with pytest.raises(TypeError, match="Could not map type"):
+        serializers.map_type(Plain)
+
+
 def test_explicit_container_serializer_round_trips_through_snapshot_fields(tmp_path):
     string_list = serializers.List.of_type(serializers.String)
 
@@ -527,7 +641,11 @@ def test_explicit_container_serializer_round_trips_through_snapshot_fields(tmp_p
     assert Sample.snapshots.get("a").tags == ["alpha", "beta"]
 
 
-def test_registered_serializer_applies_for_external_type(tmp_path):
+def test_serializer_register_api_is_not_public():
+    assert not hasattr(serializers, "register")
+
+
+def test_stash_serializer_applies_for_external_type(tmp_path):
     class Money:
         def __init__(self, currency: str, amount: float) -> None:
             self.currency = currency
@@ -550,9 +668,9 @@ def test_registered_serializer_applies_for_external_type(tmp_path):
             currency, amount = str(value).split()
             return Money(currency, float(amount))
 
-    serializers.register(Money, MoneySerializer)
+    stash = Stash(tmp_path, serializers={Money: MoneySerializer})
 
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.yml", stash=stash, manual=True)
     class Invoice:
         name: str
         total: Money
@@ -561,6 +679,104 @@ def test_registered_serializer_applies_for_external_type(tmp_path):
 
     assert "total: USD 12.50" in (tmp_path / "a.yml").read_text(encoding="utf-8")
     assert Invoice.snapshots.get("a").total == Money("USD", 12.5)
+
+
+def test_stash_local_serializers_isolate_same_type_between_libraries(tmp_path):
+    class Token:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def __eq__(self, other):
+            return isinstance(other, Token) and self.value == other.value
+
+    class PrefixSerializer(serializers.Serializer):
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return "prefix:" + value.value
+
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return Token(str(value).removeprefix("prefix:"))
+
+    class SuffixSerializer(serializers.Serializer):
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return value.value + ":suffix"
+
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return Token(str(value).removesuffix(":suffix"))
+
+    first = Stash(tmp_path / "first", serializers={Token: PrefixSerializer})
+    second = Stash(tmp_path / "second", serializers={Token: SuffixSerializer})
+
+    @snapclass("{self.name}.yml", stash=first, manual=True)
+    class FirstRecord:
+        name: str
+        token: Token
+
+    @snapclass("{self.name}.yml", stash=second, manual=True)
+    class SecondRecord:
+        name: str
+        token: Token
+
+    FirstRecord("a", Token("shared")).snapshot.save()
+    SecondRecord("a", Token("shared")).snapshot.save()
+
+    assert (tmp_path / "first" / "a.yml").read_text(encoding="utf-8") == (
+        "token: prefix:shared\n"
+    )
+    assert (tmp_path / "second" / "a.yml").read_text(encoding="utf-8") == (
+        "token: shared:suffix\n"
+    )
+    assert FirstRecord.snapshots.get("a").token == Token("shared")
+    assert SecondRecord.snapshots.get("a").token == Token("shared")
+
+
+def test_explicit_fields_beat_stash_serializer_policy(tmp_path):
+    class Token:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def __eq__(self, other):
+            return isinstance(other, Token) and self.value == other.value
+
+    class StashSerializer(serializers.Serializer):
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return "stash:" + value.value
+
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return Token(str(value).removeprefix("stash:"))
+
+    class FieldSerializer(serializers.Serializer):
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return "field:" + value.value
+
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return Token(str(value).removeprefix("field:"))
+
+    stash = Stash(tmp_path, serializers={Token: StashSerializer})
+
+    @snapclass(
+        "{self.name}.yml",
+        stash=stash,
+        fields={"token": FieldSerializer},
+        manual=True,
+    )
+    class Record:
+        name: str
+        token: Token
+
+    Record("a", Token("explicit")).snapshot.save()
+
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == (
+        "token: field:explicit\n"
+    )
+    assert Record.snapshots.get("a").token == Token("explicit")
 
 
 def test_serializer_subclass_annotation_round_trips_and_loads_from_text(tmp_path):
@@ -590,7 +806,7 @@ def test_serializer_subclass_annotation_round_trips_and_loads_from_text(tmp_path
     assert loaded.when == MyDateTime(2026, 3, 2, 8, 15)
 
 
-def test_registered_serializer_with_default_round_trips_and_loads_from_text(tmp_path):
+def test_stash_serializer_with_default_round_trips_and_loads_from_text(tmp_path):
     class LedgerStamp:
         def __init__(self, value: dt.datetime) -> None:
             self.value = value
@@ -607,9 +823,9 @@ def test_registered_serializer_with_default_round_trips_and_loads_from_text(tmp_
         def to_python_value(cls, value, **_kwargs):
             return LedgerStamp(dt.datetime.fromisoformat(str(value).removeprefix("ledger:")))
 
-    serializers.register(LedgerStamp, LedgerStampSerializer)
+    stash = Stash(tmp_path, serializers={LedgerStamp: LedgerStampSerializer})
 
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.yml", stash=stash, manual=True)
     class Timestamp:
         name: str
         when: LedgerStamp | None = None
@@ -628,7 +844,36 @@ def test_registered_serializer_with_default_round_trips_and_loads_from_text(tmp_
     assert loaded.when == LedgerStamp(dt.datetime(2026, 3, 2, 8, 15))
 
 
-def test_registered_serializer_applies_for_unresolved_string_annotation(tmp_path):
+def test_stash_serializer_replaces_global_datetime_registration_pattern(tmp_path):
+    class DateTimeSerializer(serializers.Serializer):
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return value.isoformat()
+
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return dt.datetime.fromisoformat(str(value))
+
+    stash = Stash(tmp_path, serializers={dt.datetime: DateTimeSerializer})
+
+    @snapclass("{self.name}.yml", stash=stash, manual=True)
+    class Timestamp:
+        name: str
+        when: dt.datetime
+
+    Timestamp("sample", dt.datetime(2026, 3, 1, 12, 30)).snapshot.save()
+
+    assert YAMLFormatter.loads((tmp_path / "sample.yml").read_text(encoding="utf-8")) == {
+        "when": "2026-03-01T12:30:00",
+    }
+    loaded = Timestamp.snapshots.get("sample")
+    assert loaded.when == dt.datetime(2026, 3, 1, 12, 30)
+
+    loaded.snapshot.text = "when: '2026-03-02T08:15:00'\n"
+    assert loaded.when == dt.datetime(2026, 3, 2, 8, 15)
+
+
+def test_stash_serializer_applies_for_unresolved_string_annotation(tmp_path):
     class Money:
         def __init__(self, currency: str, amount: float) -> None:
             self.currency = currency
@@ -651,9 +896,9 @@ def test_registered_serializer_applies_for_unresolved_string_annotation(tmp_path
             currency, amount = str(value).split()
             return Money(currency, float(amount))
 
-    serializers.register("LedgerMoney", MoneySerializer)
+    stash = Stash(tmp_path, serializers={"LedgerMoney": MoneySerializer})
 
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.yml", stash=stash, manual=True)
     class Invoice:
         name: str
         count: int
@@ -670,13 +915,33 @@ def test_registered_serializer_applies_for_unresolved_string_annotation(tmp_path
     assert loaded.total == Money("USD", 12.5)
 
 
-def test_registering_type_also_registers_class_name():
+def test_stash_serializer_type_key_also_supports_class_name_annotation(tmp_path):
     class SnapclassRegistryNameTestToken:
         pass
 
     class TokenSerializer(serializers.Serializer):
-        pass
+        @classmethod
+        def to_preserialization_data(cls, value, **_kwargs):
+            return "token"
 
-    serializers.register(SnapclassRegistryNameTestToken, TokenSerializer)
+        @classmethod
+        def to_python_value(cls, value, **_kwargs):
+            return SnapclassRegistryNameTestToken()
 
-    assert serializers.serializer_for_hint("SnapclassRegistryNameTestToken") is TokenSerializer
+    stash = Stash(
+        tmp_path,
+        serializers={SnapclassRegistryNameTestToken: TokenSerializer},
+    )
+
+    @snapclass("{self.name}.yml", stash=stash, manual=True)
+    class TokenRecord:
+        name: str
+        token: "SnapclassRegistryNameTestToken"
+
+    TokenRecord("sample", SnapclassRegistryNameTestToken()).snapshot.save()
+
+    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "token: token\n"
+    assert isinstance(
+        TokenRecord.snapshots.get("sample").token,
+        SnapclassRegistryNameTestToken,
+    )

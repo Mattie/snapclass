@@ -93,7 +93,11 @@ def test_plugins_export_mypy_entrypoint():
     assert plugins.mypy("1.18.1").__name__ in {"SnapclassPlugin", "MypyUnavailablePlugin"}
 
 
-def test_formatters_register_feeds_snapshot_load_and_save(tmp_path):
+def test_global_register_apis_are_not_public():
+    assert not hasattr(formatters, "register")
+
+
+def test_stash_formatter_feeds_snapshot_load_and_save(tmp_path):
     class PipeFormatter(formatters.Formatter):
         @classmethod
         def extensions(cls) -> set[str]:
@@ -111,9 +115,9 @@ def test_formatters_register_feeds_snapshot_load_and_save(tmp_path):
         def serialize(cls, data: dict) -> str:
             return "".join(f"{key}|{value}\n" for key, value in data.items())
 
-    formatters.register(".pipe", PipeFormatter)
+    stash = Stash(tmp_path, formatters={".pipe": PipeFormatter})
 
-    @snapclass("{self.name}.pipe", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.pipe", stash=stash, manual=True)
     class Prompt:
         name: str
         text: str = ""
@@ -125,7 +129,7 @@ def test_formatters_register_feeds_snapshot_load_and_save(tmp_path):
     assert Prompt.snapshots.get("Popsicle").text == "loaded"
 
 
-def test_formatters_register_snapshot_load_passes_real_named_file_object(tmp_path):
+def test_stash_formatter_snapshot_load_passes_real_named_file_object(tmp_path):
     class ReopeningFormatter(formatters.Formatter):
         @classmethod
         def extensions(cls) -> set[str]:
@@ -141,9 +145,9 @@ def test_formatters_register_snapshot_load_passes_real_named_file_object(tmp_pat
         def serialize(cls, data: dict) -> str:
             return "".join(f"{key}|{value}\n" for key, value in data.items())
 
-    formatters.register(".reopen", ReopeningFormatter)
+    stash = Stash(tmp_path, formatters={".reopen": ReopeningFormatter})
 
-    @snapclass("{self.name}.reopen", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.reopen", stash=stash, manual=True)
     class Prompt:
         name: str
         text: str = ""
@@ -168,9 +172,9 @@ def test_formatters_format_alias_supports_stale_docs_base_class(tmp_path):
         def serialize(cls, data: dict) -> str:
             return f"text={data['text']}"
 
-    formatters.register(".legacy", PipeFormat)
+    stash = Stash(tmp_path, formatters={".legacy": PipeFormat})
 
-    @snapclass("{self.name}.legacy", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.legacy", stash=stash, manual=True)
     class Prompt:
         name: str
         text: str = ""
@@ -183,7 +187,7 @@ def test_formatters_format_alias_supports_stale_docs_base_class(tmp_path):
     assert Prompt.snapshots.get("Popsicle").text == "loaded"
 
 
-def test_formatters_register_accepts_formatter_class_for_all_extensions(tmp_path):
+def test_stash_formatters_can_map_formatter_class_for_all_extensions(tmp_path):
     class MultiFormatter(formatters.Formatter):
         @classmethod
         def extensions(cls) -> set[str]:
@@ -199,14 +203,17 @@ def test_formatters_register_accepts_formatter_class_for_all_extensions(tmp_path
             key, value = next(iter(data.items()))
             return f"{key}={value}\n"
 
-    formatters.register(MultiFormatter)
+    stash = Stash(
+        tmp_path,
+        formatters={extension: MultiFormatter for extension in MultiFormatter.extensions()},
+    )
 
-    @snapclass("{self.name}.multi", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.multi", stash=stash, manual=True)
     class First:
         name: str
         text: str = ""
 
-    @snapclass("{self.name}.multi2", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.multi2", stash=stash, manual=True)
     class Second:
         name: str
         text: str = ""
@@ -231,7 +238,7 @@ def test_formatters_json5_accepts_comments(tmp_path):
     assert formatters.deserialize(path, ".json5") == {"value": 1}
 
 
-def test_app_owned_formatter_can_keep_compact_yaml_shape(tmp_path):
+def test_app_owned_stash_formatter_can_keep_compact_yaml_shape(tmp_path):
     class CompactTurnsFormatter(formatters.YAML):
         @classmethod
         def deserialize(cls, file_object: IO[str]) -> dict:
@@ -256,27 +263,24 @@ def test_app_owned_formatter_can_keep_compact_yaml_shape(tmp_path):
                 ]
             return super().serialize(data)
 
-    formatters.register(".yml", CompactTurnsFormatter)
+    stash = Stash(tmp_path, formatters={".yml": CompactTurnsFormatter})
 
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.yml", stash=stash, manual=True)
     class Chat:
         name: str
         messages: list[dict]
 
-    try:
-        (tmp_path / "Popsicle.yml").write_text(
-            "messages:\n  - developer: Follow house style.\n", encoding="utf-8"
-        )
-        chat = Chat.snapshots.get("Popsicle")
-        assert chat.messages == [{"system": "Follow house style."}]
+    (tmp_path / "Popsicle.yml").write_text(
+        "messages:\n  - developer: Follow house style.\n", encoding="utf-8"
+    )
+    chat = Chat.snapshots.get("Popsicle")
+    assert chat.messages == [{"system": "Follow house style."}]
 
-        chat.messages = [{"assistant": {"text": "Done."}}]
-        chat.snapshot.save()
-        saved = (tmp_path / "Popsicle.yml").read_text(encoding="utf-8")
-        assert "assistant: Done." in saved
-        assert "text:" not in saved
-    finally:
-        formatters.register(".yml", formatters.YAML)
+    chat.messages = [{"assistant": {"text": "Done."}}]
+    chat.snapshot.save()
+    saved = (tmp_path / "Popsicle.yml").read_text(encoding="utf-8")
+    assert "assistant: Done." in saved
+    assert "text:" not in saved
 
 
 def test_auto_loads_inferred_fields_and_saves_new_assignments(tmp_path, monkeypatch):

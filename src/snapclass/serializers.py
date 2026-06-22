@@ -171,7 +171,14 @@ class List(Serializer):
         return value
 
     @classmethod
-    def to_preserialization_data(cls, python_value: Any, *, default_to_skip: Any = None, **_kwargs: Any) -> list[Any]:
+    def to_preserialization_data(
+        cls,
+        python_value: Any,
+        *,
+        default_to_skip: Any = None,
+        minimal_diffs: bool | None = None,
+        **_kwargs: Any,
+    ) -> list[Any]:
         data: list[Any] = []
         convert = cls.SERIALIZER.to_preserialization_data
 
@@ -185,7 +192,9 @@ class List(Serializer):
 
         if data == default_to_skip:
             data.clear()
-        if sessions.MINIMAL_DIFFS:
+        if minimal_diffs is None:
+            minimal_diffs = sessions.MINIMAL_DIFFS
+        if minimal_diffs:
             return data or [None]
         return data
 
@@ -304,32 +313,57 @@ class Enumeration(Serializer):
         return python_value.value
 
 
-_REGISTRY: dict[type | str, type[Serializer]] = {}
+_DEFAULT_SERIALIZERS: dict[type | str, type[Serializer]] = {
+    bool: Boolean,
+    "bool": Boolean,
+    int: Integer,
+    "int": Integer,
+    float: Float,
+    "float": Float,
+    "Number": Number,
+    str: String,
+    "str": String,
+    "Text": Text,
+    list: List,
+    "list": List,
+    dict: Dictionary,
+    "dict": Dictionary,
+    set: Set,
+    "set": Set,
+}
 
 
-def register(type_: type | str, serializer: type[Serializer]) -> None:
-    _REGISTRY[type_] = serializer
-    if isinstance(type_, type):
-        _REGISTRY[type_.__name__] = serializer
+def normalize_serializers(
+    serializers: Mapping[type | str, type[Serializer]] | None,
+) -> dict[type | str, type[Serializer]]:
+    if serializers is None:
+        return {}
+    normalized: dict[type | str, type[Serializer]] = {}
+    for type_, serializer in serializers.items():
+        if not isinstance(type_, (type, str)):
+            raise TypeError("serializer keys must be types or strings")
+        if not isinstance(serializer, type) or not issubclass(serializer, Serializer):
+            raise TypeError("serializer values must be Serializer subclasses")
+        normalized[type_] = serializer
+        if isinstance(type_, type):
+            normalized[type_.__name__] = serializer
+    return normalized
 
 
-def serializer_for_hint(hint: Any) -> type[Serializer] | None:
+def serializer_for_hint(
+    hint: Any,
+    *,
+    serializers: Mapping[type | str, type[Serializer]] | None = None,
+) -> type[Serializer] | None:
     if isinstance(hint, str):
         hint = _normalize_string_hint(hint)
-        if hint in _REGISTRY:
-            return _REGISTRY[hint]
-        for serializer in _serializer_subclasses():
-            if serializer.__name__ == hint:
-                register(hint, serializer)
-                return serializer
-        return {
-            "bool": Boolean,
-            "int": Integer,
-            "float": Float,
-            "Number": Number,
-            "str": String,
-            "Text": Text,
-        }.get(hint)
+        if not isinstance(hint, str):
+            return serializer_for_hint(hint, serializers=serializers)
+        if serializers is not None and hint in serializers:
+            return serializers[hint]
+        if hint in _DEFAULT_SERIALIZERS:
+            return _DEFAULT_SERIALIZERS[hint]
+        return None
     if isinstance(hint, type) and issubclass(hint, Serializer):
         return hint
     origin = get_origin(hint)
@@ -339,9 +373,12 @@ def serializer_for_hint(hint: Any) -> type[Serializer] | None:
         except TypeError:
             return None
     if isinstance(hint, type):
-        if hint in _REGISTRY and hint not in {list, dict, set}:
-            return _REGISTRY[hint]
-        for type_, serializer in reversed(_REGISTRY.items()):
+        if serializers is not None and hint in serializers:
+            return serializers[hint]
+        if hint in _DEFAULT_SERIALIZERS and hint not in {list, dict, set}:
+            return _DEFAULT_SERIALIZERS[hint]
+        local_items = list(serializers.items()) if serializers is not None else []
+        for type_, serializer in reversed(local_items):
             if (
                 isinstance(type_, type)
                 and type_ not in {list, dict, set, int}
@@ -352,8 +389,8 @@ def serializer_for_hint(hint: Any) -> type[Serializer] | None:
 
 
 def map_type(cls: Any, *, name: str = "", item_cls: type | None = None) -> type[Serializer]:
-    if cls in _REGISTRY:
-        return _REGISTRY[cls]
+    if cls in _DEFAULT_SERIALIZERS:
+        return _DEFAULT_SERIALIZERS[cls]
     if dataclasses.is_dataclass(cls):
         return Dataclass.of_mappings(
             cls,
@@ -442,16 +479,6 @@ def _contains_serializer_annotation(hint: Any) -> bool:
     return any(_contains_serializer_annotation(arg) for arg in get_args(hint))
 
 
-def _serializer_subclasses() -> list[type[Serializer]]:
-    found: list[type[Serializer]] = []
-    pending = list(Serializer.__subclasses__())
-    while pending:
-        cls = pending.pop()
-        found.append(cls)
-        pending.extend(cls.__subclasses__())
-    return found
-
-
 def _install_serializer_submodule(
     suffix: str, names: dict[str, type[Serializer]]
 ) -> None:
@@ -483,12 +510,3 @@ _install_serializer_submodule(
 )
 _install_serializer_submodule("enumerations", {"Enumeration": Enumeration})
 _install_serializer_submodule("extensions", {"Number": Number, "Text": Text})
-
-
-register(bool, Boolean)
-register(int, Integer)
-register(float, Float)
-register(str, String)
-register(list, List)
-register(dict, Dictionary)
-register(set, Set)

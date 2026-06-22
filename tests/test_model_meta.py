@@ -14,6 +14,8 @@ def test_model_exposes_default_meta_configuration():
     assert Model.Meta.snapshot_defaults is False
     assert Model.Meta.snapshot_infer is False
     assert Model.Meta.snapshot_stash is None
+    assert Model.Meta.snapshot_minimal_diffs is None
+    assert Model.Meta.snapshot_write_delay is None
     assert Model.Meta.snapshot_unknown == "ignore"
     assert Model.Meta.snapshot_conflict == "overwrite"
 

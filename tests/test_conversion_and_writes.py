@@ -278,6 +278,40 @@ def test_generic_custom_serializer_annotation_round_trips(tmp_path):
     assert loaded.contents[0].second == 360
 
 
+def test_generic_serializer_mapping_exposes_specialized_subtypes():
+    item_type = TypeVar("item_type")
+
+    class Box(Generic[item_type], serializers.Serializer):
+        def __init__(self, value: item_type) -> None:
+            self.value = value
+
+        @classmethod
+        def to_python_value(cls, deserialized_data, *, target_object=None):
+            return cls(cls.SERIALIZERS[0].to_python_value(deserialized_data))
+
+        @classmethod
+        def to_preserialization_data(cls, python_value, *, default_to_skip=None):
+            return cls.SERIALIZERS[0].to_preserialization_data(python_value.value)
+
+    integer_box = serializers.map_type(Box[int])
+    string_box = serializers.map_type(Box[str])
+    float_list_box = serializers.map_type(Box[list[float]])
+
+    assert integer_box.__name__ == "GenericIntegerBox"
+    assert integer_box.SERIALIZERS == [serializers.Integer]
+    assert integer_box.to_python_value("4").value == 4
+    assert integer_box.to_preserialization_data(Box(5)) == 5
+
+    assert string_box.__name__ == "GenericStringBox"
+    assert string_box.SERIALIZERS == [serializers.String]
+    assert string_box.to_python_value(42).value == "42"
+
+    assert float_list_box.__name__ == "GenericFloatListBox"
+    assert float_list_box.SERIALIZERS[0].__name__ == "FloatList"
+    assert float_list_box.to_python_value(["1.5", "2"]).value == [1.5, 2.0]
+    assert float_list_box.to_preserialization_data(Box([1, 2.5])) == [1.0, 2.5]
+
+
 def test_typeddict_annotations_load_as_plain_dicts_with_warning(tmp_path):
     class Metadata(TypedDict):
         rating: int
@@ -503,9 +537,9 @@ def test_schema_mismatch_reports_custom_serializer_failures(tmp_path):
         def to_preserialization_data(cls, value, **_kwargs):
             return f"${value.cents / 100:.2f}"
 
-    serializers.register(Money, MoneySerializer)
+    stash = Stash(tmp_path, serializers={Money: MoneySerializer})
 
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass("{self.name}.yml", stash=stash, manual=True)
     class Invoice:
         name: str
         total: Money

@@ -1,12 +1,35 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "snapclass"
 version = "0.1.0"
 description = "Human-readable file persistence for Python dataclasses."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Mattie Casper" },
+]
+keywords = [
+  "dataclasses",
+  "persistence",
+  "serialization",
+  "yaml",
+  "toml",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
 dependencies = [
   "json5>=0.9,<1",
   "ruamel.yaml>=0.18,<0.20",
@@ -20,6 +43,10 @@ test = [
 typing = [
   "mypy>=1.11,<3",
 ]
+
+[project.urls]
+Repository = "https://github.com/Mattie/snapclass"
+Issues = "https://github.com/Mattie/snapclass/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

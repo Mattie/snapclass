@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Build and check distributions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v5
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish-to-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/snapclass
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v6
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  verify-testpypi:
+    name: Verify TestPyPI install
+    needs: publish-to-testpypi
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install from TestPyPI
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          version="${GITHUB_REF_NAME#v}"
+          for attempt in 1 2 3 4 5; do
+            python -m pip install \
+              --index-url https://test.pypi.org/simple/ \
+              --extra-index-url https://pypi.org/simple/ \
+              "snapclass==${version}" && break
+            if [ "${attempt}" = "5" ]; then
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Run import smoke test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+
+          from snapclass import Stash, snapclass
+
+          with TemporaryDirectory() as tmpdir:
+              stash = Stash(tmpdir)
+
+              @snapclass("{self.slug}.yml", stash=stash)
+              class Note:
+                  slug: str
+                  body: str = ""
+
+              Note("release-smoke", "ok").snapshot.save()
+              loaded = Note.snapshots.get("release-smoke")
+              assert loaded.body == "ok"
+              assert (Path(tmpdir) / "release-smoke.yml").exists()
+          PY
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: verify-testpypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/snapclass
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v6
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

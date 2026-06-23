@@ -20,17 +20,20 @@ need. You can also include a `sidecar` when you have a doc or binary you want to
 ```python
 from snapclass import snapclass
 
-@snapclass("{self.slug}.yml")
+@snapclass("{self.name}.yml")
 class Note:
-    slug: str
+    name: str
     title: str
     body: str = ""
 
-Note(
+mynote = Note(
     "first_note",
     "Today I used snapclass!",
-    "My first day using snapclass. It saved my notes to YAML for me.",
-).snapshot.save()
+    "It was my first day of snapclass. My note was saved to YAML for me!",
+)
+mynote.snapshot.save()
+
+# Load it back later with the same name.
 same_note = Note.snapshots.get("first_note")
 ```
 

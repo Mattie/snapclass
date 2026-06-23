@@ -31,7 +31,7 @@ def test_lorebubble_world_bound_assets_sidecars_and_logs(tmp_path):
         relationships: list[dict[str, str]] = field(default_factory=list)
         version_history: list[dict[str, str]] = field(default_factory=list)
 
-        body = sidecar.markdown(field="content_file", default="{self.slug}.md")
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
 
     @snapclass("{self.name}.yml", stash=types, defaults=True)
     class Type:
@@ -82,7 +82,7 @@ def test_lorebubble_world_bound_assets_sidecars_and_logs(tmp_path):
         title="Dusk Court",
         tags=["place"],
     )
-    article.body.write("# Dusk Court\n\nMoonlit court notes.\n")
+    article.body = "# Dusk Court\n\nMoonlit court notes.\n"
     article.relationships.append({"kind": "neighbor", "target": "lantern-gate"})
     article.version_history.append({"summary": "created"})
     place_type = Type.snapshots(storybook_types).get_or_create(
@@ -107,7 +107,7 @@ def test_lorebubble_world_bound_assets_sidecars_and_logs(tmp_path):
         "dusk-court",
         title="Other Dusk Court",
     )
-    other_article.body.write("# Other World\n")
+    other_article.body = "# Other World\n"
 
     storybook_path = tmp_path / ".lorebubble" / "Storybook"
     other_world_path = tmp_path / ".lorebubble" / "OtherWorld"
@@ -144,7 +144,7 @@ def test_lorebubble_world_bound_assets_sidecars_and_logs(tmp_path):
     assert "article.create" in recording_text
 
     loaded_article = Article.snapshots(storybook_articles).get("dusk-court")
-    assert loaded_article.body.read().startswith("# Dusk Court")
+    assert loaded_article.body.startswith("# Dusk Court")
     assert loaded_article.relationships == [
         {"kind": "neighbor", "target": "lantern-gate"}
     ]
@@ -159,12 +159,12 @@ def test_lorebubble_world_bound_assets_sidecars_and_logs(tmp_path):
     assert loaded_ontology.relationships == [
         {"name": "neighbor", "inverse": "neighbor"}
     ]
-    assert loaded_other_article.body.read() == "# Other World\n"
+    assert loaded_other_article.body == "# Other World\n"
     assert (other_world_path / "article" / "dusk-court" / "article.yml").exists()
 
     body.unlink()
     stale_article = Article.snapshots(storybook_articles).get("dusk-court")
-    assert stale_article.body.stale is True
+    assert stale_article.body.snapshot.stale is True
 
 
 def test_lorebubble_world_stashes_are_isolated_by_base_root_and_world(tmp_path):
@@ -179,7 +179,7 @@ def test_lorebubble_world_stashes_are_isolated_by_base_root_and_world(tmp_path):
         title: str = ""
         content_file: str = ""
 
-        body = sidecar.markdown(field="content_file", default="{self.slug}.md")
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
 
     a_storybook = articles_a.bind(world="Storybook")
     a_other = articles_a.bind(world="OtherWorld")
@@ -189,28 +189,28 @@ def test_lorebubble_world_stashes_are_isolated_by_base_root_and_world(tmp_path):
         "dusk-court",
         title="A Storybook",
     )
-    article_a.body.write("# A Storybook\n")
+    article_a.body = "# A Storybook\n"
     article_other = Article.snapshots(a_other).get_or_create(
         "dusk-court",
         title="A Other World",
     )
-    article_other.body.write("# A Other World\n")
+    article_other.body = "# A Other World\n"
     article_b = Article.snapshots(b_storybook).get_or_create(
         "dusk-court",
         title="B Storybook",
     )
-    article_b.body.write("# B Storybook\n")
+    article_b.body = "# B Storybook\n"
 
     a_storybook_article = Article.snapshots(a_storybook).get("dusk-court")
     a_other_article = Article.snapshots(a_other).get("dusk-court")
     b_storybook_article = Article.snapshots(b_storybook).get("dusk-court")
 
     assert a_storybook_article.title == "A Storybook"
-    assert a_storybook_article.body.read() == "# A Storybook\n"
+    assert a_storybook_article.body == "# A Storybook\n"
     assert a_other_article.title == "A Other World"
-    assert a_other_article.body.read() == "# A Other World\n"
+    assert a_other_article.body == "# A Other World\n"
     assert b_storybook_article.title == "B Storybook"
-    assert b_storybook_article.body.read() == "# B Storybook\n"
+    assert b_storybook_article.body == "# B Storybook\n"
     assert a_storybook_article.snapshot.path == (
         tmp_path
         / "user-a"

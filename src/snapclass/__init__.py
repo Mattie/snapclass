@@ -14,9 +14,11 @@ from .schemas import (
     frozen,
     sync,
 )
+from .fresh import Fresh
 from .stash import Stash
 
 __all__ = [
+    "Fresh",
     "Missing",
     "SnapclassError",
     "Collection",

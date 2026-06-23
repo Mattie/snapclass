@@ -62,6 +62,7 @@ def test_bare_snapclass_decorator_is_dataclass_replacement_for_nested_values(tmp
 
     loaded = Chat.snapshots.get("Popsicle")
     assert is_dataclass(Params)
+    assert not hasattr(Params(), "snapshot")
     assert loaded.params == Params("gpt-5-chat-latest", 0.2)
     assert (tmp_path / "Popsicle.yml").read_text(encoding="utf-8") == (
         "params:\n"

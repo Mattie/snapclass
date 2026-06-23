@@ -70,7 +70,7 @@ def test_project_tracker_keeps_user_tasks_and_run_archives_separate(tmp_path):
     )
 
 
-def test_notes_app_uses_yaml_metadata_with_markdown_sidecars(tmp_path):
+def test_notes_app_uses_yaml_metadata_with_text_sidecars(tmp_path):
     notes = Stash(tmp_path / "notes")
 
     @snapclass("{self.date}/{self.slug}.yml", stash=notes, manual=True)
@@ -82,7 +82,7 @@ def test_notes_app_uses_yaml_metadata_with_markdown_sidecars(tmp_path):
         tags: list[str] = field(default_factory=list)
         backlinks: list[str] = field(default_factory=list)
 
-        body = sidecar.markdown(field="body_file", default="{self.slug}.md")
+        body: str = sidecar.text(field="body_file", default="{self.slug}.md")
 
     note = Note(
         "2026-03-01",
@@ -91,7 +91,7 @@ def test_notes_app_uses_yaml_metadata_with_markdown_sidecars(tmp_path):
         tags=["journal", "snapclass"],
         backlinks=["projects/snapclass"],
     )
-    note.body.write("# Daily Note\n\nKeep the tests practical.\n")
+    note.body = "# Daily Note\n\nKeep the tests practical.\n"
 
     metadata_path = tmp_path / "notes" / "2026-03-01" / "daily.yml"
     body_path = tmp_path / "notes" / "2026-03-01" / "daily.md"
@@ -101,7 +101,7 @@ def test_notes_app_uses_yaml_metadata_with_markdown_sidecars(tmp_path):
 
     assert "body_file: daily.md" in metadata_path.read_text(encoding="utf-8")
     assert "- journal" in metadata_path.read_text(encoding="utf-8")
-    assert loaded.body.read() == "# Daily Note\n\nEdited by a person.\n"
+    assert loaded.body == "# Daily Note\n\nEdited by a person.\n"
     assert loaded.backlinks == ["projects/snapclass"]
 
 

@@ -143,6 +143,15 @@ class Stash:
         values.update(overrides)
         return Stash(**values)
 
+    def _with_parent_context(self, parent: "Stash") -> "Stash":
+        stash = parent / self if self._parent is None else self
+        bindings = {
+            name: value
+            for name, value in parent._bindings.items()
+            if name in stash._missing_placeholder_names()
+        }
+        return stash.bind(**bindings) if bindings else stash
+
     @property
     def path(self) -> Path:
         return self.resolve()

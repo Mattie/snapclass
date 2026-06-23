@@ -13,6 +13,7 @@ import threading
 import time
 import types
 import warnings
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterator, Mapping, MutableMapping, Set as AbstractSet
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +31,7 @@ _UNKNOWN_DATA_ATTR = "__snapclass_unknown_data__"
 _INFERRED_FIELDS_ATTR = "__snapclass_inferred_fields__"
 _INFERRED_HINTS_ATTR = "__snapclass_inferred_hints__"
 _DEFAULT_CACHE_ATTR = "__snapclass_default_cache__"
+_PENDING_SIDECARS_ATTR = "__snapclass_pending_sidecars__"
 _WRITE_LOCKS: dict[Path, threading.RLock] = {}
 _WRITE_LOCKS_GUARD = threading.Lock()
 
@@ -112,7 +114,7 @@ def snapclass(
 
     def decorate(cls: type):
         if not dataclasses.is_dataclass(cls):
-            cls = dataclasses.dataclass(cls, **dataclass_kwargs)
+            cls = _dataclass_with_sidecars(cls, **dataclass_kwargs)
         unknown_policy = _normalize_unknown_policy(unknown, extras_field)
         conflict_policy = _normalize_conflict_policy(conflict)
         _validate_extras_field(cls, unknown_policy, extras_field)
@@ -292,7 +294,7 @@ class Model:
             return
         meta = getattr(cls, "Meta", None)
         if not dataclasses.is_dataclass(cls):
-            dataclasses.dataclass(cls)
+            _dataclass_with_sidecars(cls)
 
         _install_model_config(
             cls,
@@ -358,6 +360,59 @@ def sync(
     return instance
 
 
+def _dataclass_with_sidecars(cls: type, **dataclass_kwargs: Any) -> type:
+    sidecars = _sidecar_descriptors_for(cls)
+    original_annotations = getattr(cls, "__annotations__", None)
+    if sidecars and original_annotations is not None:
+        dataclass_annotations = dict(original_annotations)
+        for name in sidecars:
+            dataclass_annotations.pop(name, None)
+        cls.__annotations__ = dataclass_annotations
+    try:
+        dataclass_cls = dataclasses.dataclass(cls, **dataclass_kwargs)
+    finally:
+        if original_annotations is not None:
+            cls.__annotations__ = original_annotations
+    if original_annotations is not None:
+        dataclass_cls.__annotations__ = original_annotations
+    return dataclass_cls
+
+
+def _sidecar_descriptors_for(cls: type) -> dict[str, sidecar.SidecarDescriptor]:
+    descriptors: dict[str, sidecar.SidecarDescriptor] = {}
+    for base in reversed(cls.__mro__):
+        for name, value in vars(base).items():
+            if isinstance(value, sidecar.SidecarDescriptor):
+                descriptors[name] = value
+    return descriptors
+
+
+def _sidecar_descriptor_for(
+    cls: type,
+    name: str,
+) -> sidecar.SidecarDescriptor | None:
+    return _sidecar_descriptors_for(cls).get(name)
+
+
+def _pop_sidecar_values(cls: type, values: dict[str, Any]) -> dict[str, Any]:
+    sidecar_values: dict[str, Any] = {}
+    for name in _sidecar_descriptors_for(cls):
+        if name in values:
+            sidecar_values[name] = values.pop(name)
+    return sidecar_values
+
+
+def _apply_sidecar_values(
+    instance: object,
+    values: Mapping[str, Any],
+    *,
+    save_metadata: bool,
+) -> None:
+    descriptors = _sidecar_descriptors_for(instance.__class__)
+    for name, value in values.items():
+        descriptors[name].snapshot(instance).write(value, save_metadata=save_metadata)
+
+
 @contextmanager
 def frozen(*snapshots: object):
     previous = sessions.HOOKS_ENABLED
@@ -382,9 +437,17 @@ def _install(cls: type, config: Config) -> None:
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
+        sidecar_values = _pop_sidecar_values(self.__class__, kwargs)
         object.__setattr__(self, "_snapclass_initializing", True)
+        object.__setattr__(self, _PENDING_SIDECARS_ATTR, {})
         original_init(self, *args, **kwargs)
         _attach_snapshot(self, config)
+        pending_sidecars = object.__getattribute__(self, "__dict__").pop(
+            _PENDING_SIDECARS_ATTR,
+            {},
+        )
+        _apply_sidecar_values(self, pending_sidecars, save_metadata=False)
+        _apply_sidecar_values(self, sidecar_values, save_metadata=False)
         object.__setattr__(self, "_snapclass_initializing", False)
         if _auto_enabled(config):
             if self.snapshot.exists:
@@ -398,6 +461,16 @@ def _install(cls: type, config: Config) -> None:
 
     def __setattr__(self, name: str, value: Any) -> None:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
+        sidecar_descriptor = _sidecar_descriptor_for(self.__class__, name)
+        if sidecar_descriptor is not None:
+            snapshot = getattr(self, "snapshot", None)
+            if snapshot is None or getattr(self, "_snapclass_initializing", False):
+                pending = dict(getattr(self, _PENDING_SIDECARS_ATTR, {}))
+                pending[name] = value
+                object.__setattr__(self, _PENDING_SIDECARS_ATTR, pending)
+                return
+            sidecar_descriptor.snapshot(self).write(value)
+            return
         snapshot = getattr(self, "snapshot", None)
         should_track = (
             not name.startswith("_")
@@ -816,6 +889,120 @@ class TrackedList(list):
         self._save()
 
 
+class TrackedDeque(deque):
+    def __init__(self, values: Any, snapshot: Snapshot) -> None:
+        self._snapshot = snapshot
+        super().__init__(_track_value(value, snapshot) for value in values)
+
+    def _save(self) -> None:
+        if _auto_enabled(self._snapshot._config):
+            self._snapshot.save()
+            _coerce_tracked_container_in_place(self, self._snapshot)
+
+    def append(self, item: Any) -> None:
+        super().append(_track_value(item, self._snapshot))
+        self._save()
+
+    def appendleft(self, item: Any) -> None:
+        super().appendleft(_track_value(item, self._snapshot))
+        self._save()
+
+    def extend(self, values: Any) -> None:
+        super().extend(_track_value(value, self._snapshot) for value in values)
+        self._save()
+
+    def extendleft(self, values: Any) -> None:
+        super().extendleft(_track_value(value, self._snapshot) for value in values)
+        self._save()
+
+    def insert(self, index: int, item: Any) -> None:
+        super().insert(index, _track_value(item, self._snapshot))
+        self._save()
+
+    def __setitem__(self, index: Any, item: Any) -> None:
+        if isinstance(index, slice):
+            item = [_track_value(value, self._snapshot) for value in item]
+        else:
+            item = _track_value(item, self._snapshot)
+        super().__setitem__(index, item)
+        self._save()
+
+    def __delitem__(self, index: Any) -> None:
+        super().__delitem__(index)
+        self._save()
+
+    def pop(self) -> Any:
+        value = super().pop()
+        self._save()
+        return value
+
+    def popleft(self) -> Any:
+        value = super().popleft()
+        self._save()
+        return value
+
+    def remove(self, item: Any) -> None:
+        super().remove(item)
+        self._save()
+
+    def clear(self) -> None:
+        super().clear()
+        self._save()
+
+    def reverse(self) -> None:
+        super().reverse()
+        self._save()
+
+    def rotate(self, n: int = 1) -> None:
+        super().rotate(n)
+        self._save()
+
+
+class TrackedCounter(Counter):
+    def __init__(self, values: Any, snapshot: Snapshot) -> None:
+        object.__setattr__(self, "_snapshot", snapshot)
+        dict.__init__(self)
+        Counter.update(self, values)
+
+    def _save(self) -> None:
+        if _auto_enabled(self._snapshot._config):
+            self._snapshot.save()
+            _coerce_tracked_container_in_place(self, self._snapshot)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        super().update(*args, **kwargs)
+        self._save()
+
+    def subtract(self, *args: Any, **kwargs: Any) -> None:
+        super().subtract(*args, **kwargs)
+        self._save()
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(key, value)
+        self._save()
+
+    def __delitem__(self, key: Any) -> None:
+        super().__delitem__(key)
+        self._save()
+
+    def pop(self, key: Any, default: Any = _absent) -> Any:
+        if default is _absent:
+            value = super().pop(key)
+        else:
+            value = super().pop(key, default)
+        self._save()
+        return value
+
+    def popitem(self) -> tuple[Any, Any]:
+        value = super().popitem()
+        self._save()
+        return value
+
+    def clear(self) -> None:
+        super().clear()
+        self._save()
+
+
 class TrackedDict(dict):
     def __init__(self, values: dict[Any, Any], snapshot: Snapshot) -> None:
         object.__setattr__(self, "_snapshot", snapshot)
@@ -885,6 +1072,95 @@ class TrackedDict(dict):
         return value
 
 
+class TrackedDefaultDict(defaultdict):
+    def __init__(
+        self,
+        default_factory: Callable[[], Any] | None,
+        values: Mapping[Any, Any],
+        snapshot: Snapshot,
+    ) -> None:
+        object.__setattr__(self, "_snapshot", snapshot)
+        super().__init__(default_factory)
+        dict.update(
+            self,
+            {key: _track_value(value, snapshot) for key, value in values.items()},
+        )
+
+    def __missing__(self, key: Any) -> Any:
+        if self.default_factory is None:
+            raise KeyError(key)
+        value = _track_value(self.default_factory(), self._snapshot)
+        dict.__setitem__(self, key, value)
+        self._save()
+        return value
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            self[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        if name.startswith("_"):
+            object.__delattr__(self, name)
+            return
+        try:
+            del self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def _save(self) -> None:
+        if _auto_enabled(self._snapshot._config):
+            self._snapshot.save()
+            _coerce_tracked_container_in_place(self, self._snapshot)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        dict.__setitem__(self, key, _track_value(value, self._snapshot))
+        self._save()
+
+    def __delitem__(self, key: Any) -> None:
+        dict.__delitem__(self, key)
+        self._save()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        values = dict(*args, **kwargs)
+        dict.update(
+            self,
+            {key: _track_value(value, self._snapshot) for key, value in values.items()},
+        )
+        self._save()
+
+    def pop(self, key: Any, default: Any = _absent) -> Any:
+        if default is _absent:
+            value = dict.pop(self, key)
+        else:
+            value = dict.pop(self, key, default)
+        self._save()
+        return value
+
+    def popitem(self) -> tuple[Any, Any]:
+        value = dict.popitem(self)
+        self._save()
+        return value
+
+    def clear(self) -> None:
+        dict.clear(self)
+        self._save()
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        existed = key in self
+        value = dict.setdefault(self, key, _track_value(default, self._snapshot))
+        if not existed:
+            self._save()
+        return value
+
+
 def _track_value(value: Any, snapshot: Snapshot) -> Any:
     return _track_value_inner(value, snapshot, set())
 
@@ -894,12 +1170,30 @@ def _track_value_inner(value: Any, snapshot: Snapshot, seen: set[int]) -> Any:
         if value._snapshot is snapshot:
             return value
         return TrackedList(list(value), snapshot)
+    if isinstance(value, TrackedDeque):
+        if value._snapshot is snapshot:
+            return value
+        return TrackedDeque(value, snapshot)
+    if isinstance(value, TrackedCounter):
+        if value._snapshot is snapshot:
+            return value
+        return TrackedCounter(value, snapshot)
     if isinstance(value, TrackedDict):
         if value._snapshot is snapshot:
             return value
         return TrackedDict(dict(value), snapshot)
+    if isinstance(value, TrackedDefaultDict):
+        if value._snapshot is snapshot:
+            return value
+        return TrackedDefaultDict(value.default_factory, value, snapshot)
     if isinstance(value, list):
         return TrackedList(value, snapshot)
+    if isinstance(value, deque):
+        return TrackedDeque(value, snapshot)
+    if isinstance(value, Counter):
+        return TrackedCounter(value, snapshot)
+    if isinstance(value, defaultdict):
+        return TrackedDefaultDict(value.default_factory, value, snapshot)
     if isinstance(value, dict):
         return TrackedDict(value, snapshot)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -924,7 +1218,14 @@ def _wrap_dataclass_mutables(instance: object, snapshot: Snapshot, seen: set[int
             object.__setattr__(instance, field.name, tracked)
 
 
-def _coerce_tracked_container_in_place(container: TrackedList | TrackedDict, snapshot: Snapshot) -> None:
+def _coerce_tracked_container_in_place(
+    container: TrackedList
+    | TrackedDeque
+    | TrackedCounter
+    | TrackedDefaultDict
+    | TrackedDict,
+    snapshot: Snapshot,
+) -> None:
     hint = _hint_for_tracked_value(snapshot._instance, container, None, set())
     if hint is None:
         return
@@ -939,7 +1240,18 @@ def _coerce_tracked_container_in_place(container: TrackedList | TrackedDict, sna
         items = list(coerced)
         list.clear(container)
         list.extend(container, (_track_value(item, snapshot) for item in items))
-    elif isinstance(container, TrackedDict) and isinstance(coerced, dict):
+    elif isinstance(container, TrackedDeque) and isinstance(coerced, list):
+        items = list(coerced)
+        deque.clear(container)
+        deque.extend(container, (_track_value(item, snapshot) for item in items))
+    elif isinstance(container, TrackedCounter) and isinstance(coerced, dict):
+        items = dict(coerced)
+        dict.clear(container)
+        dict.update(container, items)
+    elif isinstance(container, (TrackedDefaultDict, TrackedDict)) and isinstance(
+        coerced,
+        dict,
+    ):
         items = dict(coerced)
         dict.clear(container)
         dict.update(
@@ -980,16 +1292,22 @@ def _hint_for_tracked_value(value: Any, target: object, hint: Any, seen: set[int
                 return found
     origin = get_origin(hint)
     args = get_args(hint)
-    if isinstance(value, (TrackedList, list)):
-        item_hint = args[0] if origin is list and args else Any
+    if isinstance(value, (TrackedDeque, TrackedList, deque, list)):
+        item_hint = args[0] if origin in (deque, list) and args else Any
         for item in value:
             found = _hint_for_tracked_value(item, target, item_hint, seen)
             if found is not None:
                 return found
-    if isinstance(value, (TrackedDict, dict)):
+    if isinstance(value, (TrackedCounter, Counter)):
+        item_hint = args[0] if origin is Counter and args else Any
+        for item in value:
+            found = _hint_for_tracked_value(item, target, item_hint, seen)
+            if found is not None:
+                return found
+    if isinstance(value, (TrackedDefaultDict, TrackedDict, dict)):
         value_hint = (
             args[1]
-            if origin in (dict, Mapping, MutableMapping) and len(args) > 1
+            if _is_mapping_origin(origin) and len(args) > 1
             else Any
         )
         for item in value.values():
@@ -1012,7 +1330,14 @@ def _wrap_mutables(instance: object) -> None:
         value = getattr(instance, name, None)
         if isinstance(value, list) and not isinstance(value, TrackedList):
             object.__setattr__(instance, name, _track_value(value, snapshot))
-        elif isinstance(value, dict) and not isinstance(value, TrackedDict):
+        elif isinstance(value, deque) and not isinstance(value, TrackedDeque):
+            object.__setattr__(instance, name, _track_value(value, snapshot))
+        elif isinstance(value, Counter) and not isinstance(value, TrackedCounter):
+            object.__setattr__(instance, name, _track_value(value, snapshot))
+        elif isinstance(value, dict) and not isinstance(
+            value,
+            (TrackedCounter, TrackedDefaultDict, TrackedDict),
+        ):
             object.__setattr__(instance, name, _track_value(value, snapshot))
         elif dataclasses.is_dataclass(value) and not isinstance(value, type):
             _wrap_dataclass_mutables(value, snapshot, set())
@@ -1075,7 +1400,7 @@ def _to_data(
 def _plain(value: Any, minimal_diffs: bool | None = None) -> Any:
     if minimal_diffs is None:
         minimal_diffs = sessions.MINIMAL_DIFFS
-    if isinstance(value, (TrackedList, list)):
+    if isinstance(value, (TrackedDeque, TrackedList, deque, list)):
         if not value and minimal_diffs:
             return [None]
         return [_plain(item, minimal_diffs) for item in value]
@@ -1135,6 +1460,18 @@ def _coerce_for_preserialization(
             )
             for index, item in enumerate(_list_values(value))
         ]
+    if origin is deque:
+        subtype = args[0] if args else Any
+        return [
+            _coerce_for_preserialization(
+                item,
+                subtype,
+                f"{field_path}[{index}]",
+                stash,
+                minimal_diffs,
+            )
+            for index, item in enumerate(_list_values(value))
+        ]
     if origin in (set, frozenset, AbstractSet):
         subtype = args[0] if args else Any
         values = {
@@ -1148,7 +1485,19 @@ def _coerce_for_preserialization(
             for index, item in enumerate(value)
         }
         return frozenset(values) if origin is frozenset else values
-    if origin in (dict, Mapping, MutableMapping):
+    if origin is Counter:
+        key_type = args[0] if args else Any
+        return {
+            _coerce_for_preserialization(
+                key,
+                key_type,
+                f"{field_path}.<key>",
+                stash,
+                minimal_diffs,
+            ): int(item)
+            for key, item in dict(value).items()
+        }
+    if _is_mapping_origin(origin):
         key_type = args[0] if args else Any
         value_type = args[1] if len(args) > 1 else Any
         return {
@@ -1505,6 +1854,27 @@ def _apply_data(
                 raise _CoercionError(field.name, serializer, data[field.name], exc) from exc
         else:
             value = _coerce(data[field.name], hints.get(field.name), field.name, stash)
+            if isinstance(current, TrackedDeque) and isinstance(value, deque):
+                deque.clear(current)
+                deque.extend(
+                    current,
+                    (_track_value(item, current._snapshot) for item in value),
+                )
+                value = current
+            elif isinstance(current, TrackedCounter) and isinstance(value, Counter):
+                dict.clear(current)
+                dict.update(current, value)
+                value = current
+            elif isinstance(current, TrackedDefaultDict) and isinstance(value, dict):
+                dict.clear(current)
+                dict.update(
+                    current,
+                    {
+                        key: _track_value(item, current._snapshot)
+                        for key, item in value.items()
+                    },
+                )
+                value = current
         object.__setattr__(instance, field.name, value)
     _fill_missing_init_fields(instance, config, stash)
 
@@ -1646,6 +2016,10 @@ def _coerce(
             return None
         if origin is list:
             return []
+        if origin is deque:
+            return deque()
+        if origin is Counter:
+            return Counter()
         if hint is bool:
             return False
         if hint is int:
@@ -1667,6 +2041,13 @@ def _coerce(
             _coerce(item, subtype, f"{field_path}[{index}]", stash)
             for index, item in enumerate(value)
         ]
+    if origin is deque:
+        subtype = args[0] if args else Any
+        value = _list_values(value)
+        return deque(
+            _coerce(item, subtype, f"{field_path}[{index}]", stash)
+            for index, item in enumerate(value)
+        )
     if origin in (set, frozenset, AbstractSet):
         subtype = args[0] if args else Any
         values = {
@@ -1674,7 +2055,15 @@ def _coerce(
             for index, item in enumerate(value)
         }
         return frozenset(values) if origin is frozenset else values
-    if origin in (dict, Mapping, MutableMapping):
+    if origin is Counter:
+        key_type = args[0] if args else Any
+        return Counter(
+            {
+                _coerce(key, key_type, f"{field_path}.<key>", stash): int(item)
+                for key, item in dict(value).items()
+            }
+        )
+    if _is_mapping_origin(origin):
         key_type = args[0] if args else Any
         value_type = args[1] if len(args) > 1 else Any
         return {
@@ -1795,13 +2184,17 @@ def _matches_hint(value: Any, hint: Any) -> bool:
         return isinstance(hint, type) and type(value) is hint
     if origin is list:
         return isinstance(value, list)
+    if origin is deque:
+        return isinstance(value, deque)
     if origin is set:
         return isinstance(value, set)
     if origin is frozenset:
         return isinstance(value, frozenset)
     if origin is AbstractSet:
         return isinstance(value, set)
-    if origin in (dict, Mapping, MutableMapping):
+    if origin is Counter:
+        return isinstance(value, Counter)
+    if _is_mapping_origin(origin):
         return isinstance(value, dict)
     if dataclasses.is_dataclass(hint):
         return isinstance(value, hint)
@@ -1849,11 +2242,15 @@ def _missing_value_for_hint(
         return Missing
     if origin is list:
         return []
+    if origin is deque:
+        return deque()
     if origin in (set, AbstractSet):
         return set()
     if origin is frozenset:
         return frozenset()
-    if origin in (dict, Mapping, MutableMapping):
+    if origin is Counter:
+        return Counter()
+    if _is_mapping_origin(origin):
         return {}
     serializer = _attr_serializer_for_hint(hint, stash)
     if serializer is not None and getattr(serializer, "DEFAULT", None) is not None:
@@ -1884,7 +2281,7 @@ def _list_values(value: Any) -> list[Any]:
         if "," in value:
             return [item.strip() for item in value.split(",") if item.strip()]
         return [value]
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, (deque, list, tuple, set, frozenset)):
         return list(value)
     return [value]
 
@@ -1896,6 +2293,12 @@ def _is_typed_dict_hint(hint: Any) -> bool:
     except TypeError:
         return False
     return hasattr(hint, "__required_keys__") and hasattr(hint, "__total__")
+
+
+def _is_mapping_origin(origin: Any) -> bool:
+    return origin in (dict, Mapping, MutableMapping) or (
+        isinstance(origin, type) and issubclass(origin, Mapping)
+    )
 
 
 def _sort_key(value: Any) -> tuple[str, str]:

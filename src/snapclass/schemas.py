@@ -436,13 +436,19 @@ def _mark_snapshot_ready(instance: object) -> None:
         return
     if getattr(snapshot, "_ready", False):
         return
+    hook = getattr(instance, "__snapclass_ready__", None)
+    expected_path = snapshot.path if hook is not None else None
     snapshot._ready = True
     try:
         _call_snapshot_lifecycle_hook(
             instance,
             "__snapclass_ready__",
             snapshot=snapshot,
-            path=_snapshot_path_or_none(snapshot),
+        )
+        _ensure_snapshot_path_unchanged(
+            snapshot,
+            expected_path,
+            "__snapclass_ready__",
         )
     except Exception:
         snapshot._ready = False
@@ -454,11 +460,18 @@ def _mark_snapshot_loaded(instance: object, path: Path) -> None:
     snapshot = getattr(instance, "snapshot", None)
     if snapshot is None:
         return
+    hook = getattr(instance, "__snapclass_loaded__", None)
+    expected_path = snapshot.path if hook is not None else None
     _call_snapshot_lifecycle_hook(
         instance,
         "__snapclass_loaded__",
         snapshot=snapshot,
         path=path,
+    )
+    _ensure_snapshot_path_unchanged(
+        snapshot,
+        expected_path,
+        "__snapclass_loaded__",
     )
 
 
@@ -501,12 +514,29 @@ def _snapclass_hook_context(instance: object) -> Iterator[None]:
         object.__setattr__(instance, "_snapclass_loading", previous_loading)
 
 
-def _snapshot_path_or_none(snapshot: "Snapshot") -> Path | None:
-    """Return the resolved snapshot path when it can be used for diagnostics."""
+def _ensure_snapshot_path_unchanged(
+    snapshot: "Snapshot",
+    expected_path: Path | None,
+    hook_name: str,
+) -> None:
+    """Raise when a lifecycle hook retargets the snapshot path."""
+    if expected_path is None:
+        return
     try:
-        return snapshot.path
-    except Exception:
-        return None
+        current_path = snapshot._require_path()
+    except Exception as exc:
+        raise SnapclassError(
+            f"{hook_name} left snapshot path unresolved after lifecycle hook; "
+            "normalize snapshot path fields before loading or creating "
+            f"snapshots: {exc}"
+        ) from exc
+    if current_path == expected_path:
+        return
+    raise SnapclassError(
+        f"{hook_name} changed snapshot path from {expected_path} to "
+        f"{current_path}; normalize snapshot path fields before loading or "
+        "creating snapshots"
+    )
 
 
 def _install(cls: type, config: Config) -> None:
@@ -556,9 +586,10 @@ def _install(cls: type, config: Config) -> None:
                 object.__setattr__(self, _PENDING_SIDECARS_ATTR, pending)
                 return
             if getattr(self, "_snapclass_hooks_suppressed", False):
-                sidecar_descriptor._set_override(self, value)
-                return
-            sidecar_descriptor._clear_override(self)
+                raise SnapclassError(
+                    f"Cannot assign sidecar {name!r} during snapclass lifecycle "
+                    "hooks; write sidecars after the hook has returned"
+                )
             sidecar_descriptor.snapshot(self).write(value)
             return
         snapshot = getattr(self, "snapshot", None)
@@ -836,12 +867,10 @@ class Snapshot:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         if path is not None:
             self.path = path
-        sidecar.prepare_overrides(self._instance)
         current_path = self._require_path()
         with _write_lock_for(current_path):
             self._check_write_conflict(current_path)
             sidecar.reconcile_before_save(self._instance, current_path)
-            sidecar.flush_overrides(self._instance)
             data = _to_data(
                 self._instance,
                 self._config,
@@ -866,15 +895,11 @@ class Snapshot:
         path: str | os.PathLike[str] | None = None,
         *,
         _initial: bool = False,
-        _visited_paths: set[Path] | None = None,
     ) -> None:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         if path is not None:
             self.path = path
         current_path = self._require_path()
-        if _visited_paths is None:
-            _visited_paths = set()
-        _visited_paths.add(current_path)
         text = current_path.read_text(encoding="utf-8")
         try:
             data = _load_data(current_path, text, self._config, self.stash)
@@ -883,7 +908,6 @@ class Snapshot:
         object.__setattr__(self._instance, "_snapclass_loading", True)
         try:
             try:
-                sidecar.clear_overrides(self._instance)
                 _apply_data(self._instance, data, preserve_non_default=_initial)
             except _CoercionError as exc:
                 raise SnapclassError(_schema_mismatch_message(current_path, exc)) from exc
@@ -894,25 +918,8 @@ class Snapshot:
             self.modified = False
             _mark_snapshot_ready(self._instance)
             _mark_snapshot_loaded(self._instance, current_path)
-            self._reload_after_lifecycle_path_change(current_path, _visited_paths)
         finally:
             object.__setattr__(self._instance, "_snapclass_loading", False)
-
-    def _reload_after_lifecycle_path_change(
-        self,
-        loaded_path: Path,
-        visited_paths: set[Path],
-    ) -> None:
-        """Load an existing post-hook path before returning from a retargeted load."""
-        current_path = self._require_path()
-        if current_path == loaded_path or not current_path.exists():
-            return
-        if current_path in visited_paths:
-            raise SnapclassError(
-                "Lifecycle hooks changed snapshot path in a load cycle: "
-                f"{loaded_path} -> {current_path}"
-            )
-        self.load(_visited_paths=visited_paths)
 
     def _require_path(self) -> Path:
         try:

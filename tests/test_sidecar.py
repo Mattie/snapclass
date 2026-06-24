@@ -56,117 +56,23 @@ def test_sidecar_constructor_values_are_visible_before_ready_hook_runs(tmp_path)
     assert observed == ["# Dusk Court\n"]
 
 
-def test_sidecar_assignment_in_loaded_hook_does_not_rewrite_files(tmp_path):
+def test_sidecar_assignment_in_lifecycle_hook_raises_without_writing(tmp_path):
     articles = Stash(tmp_path / "world") / "article"
-    hook_calls: list[str] = []
 
     @snapclass("{self.slug}/article.yml", stash=articles, manual=True)
     class Article:
         slug: str
-        content_file: str = ""
-        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
-
-        def __snapclass_loaded__(self, *, snapshot, path):
-            """File data has been applied and sidecar hook writes stay in memory."""
-            if not hook_calls:
-                self.body = "Hook body\n"
-            hook_calls.append("loaded")
-
-    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
-    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
-    metadata.parent.mkdir(parents=True)
-    metadata.write_text("content_file: dusk-court.md\n", encoding="utf-8")
-    body.write_text("File body\n", encoding="utf-8")
-
-    article = Article.snapshots.get("dusk-court")
-
-    assert article.body == "Hook body\n"
-    assert body.read_text(encoding="utf-8") == "File body\n"
-    assert metadata.read_text(encoding="utf-8") == "content_file: dusk-court.md\n"
-
-    article.snapshot.load()
-
-    assert article.body == "File body\n"
-    assert hook_calls == ["loaded", "loaded"]
-
-
-def test_ready_hook_sidecar_assignment_persists_on_initial_auto_save(tmp_path):
-    articles = Stash(tmp_path / "world") / "article"
-
-    @snapclass("{self.slug}/article.yml", stash=articles)
-    class Article:
-        slug: str
-        content_file: str = ""
-        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+        body: str = sidecar.text("{self.slug}.md")
 
         def __snapclass_ready__(self, *, snapshot):
-            """Snapshot is attached and initial sidecar state can be prepared."""
+            """Snapshot hooks may read sidecars, but writes happen after hooks."""
             self.body = "Ready body\n"
 
-    article = Article("dusk-court")
+    with pytest.raises(SnapclassError, match="Cannot assign sidecar 'body'"):
+        Article("dusk-court")
 
-    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
     body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
-
-    assert article.body == "Ready body\n"
-    assert body.read_text(encoding="utf-8") == "Ready body\n"
-    assert metadata.read_text(encoding="utf-8") == "content_file: dusk-court.md\n"
-    assert Article.snapshots.get("dusk-court").body == "Ready body\n"
-
-
-def test_loaded_hook_sidecar_assignment_persists_on_explicit_save(tmp_path):
-    articles = Stash(tmp_path / "world") / "article"
-    hook_calls: list[str] = []
-
-    @snapclass("{self.slug}/article.yml", stash=articles, manual=True)
-    class Article:
-        slug: str
-        content_file: str = ""
-        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
-
-        def __snapclass_loaded__(self, *, snapshot, path):
-            """File data is applied before sidecar changes are explicitly saved."""
-            if not hook_calls:
-                self.body = "Hook body\n"
-            hook_calls.append("loaded")
-
-    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
-    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
-    metadata.parent.mkdir(parents=True)
-    metadata.write_text("content_file: dusk-court.md\n", encoding="utf-8")
-    body.write_text("File body\n", encoding="utf-8")
-
-    article = Article.snapshots.get("dusk-court")
-    article.snapshot.save()
-    reloaded = Article.snapshots.get("dusk-court")
-
-    assert body.read_text(encoding="utf-8") == "Hook body\n"
-    assert metadata.read_text(encoding="utf-8") == "content_file: dusk-court.md\n"
-    assert reloaded.body == "Hook body\n"
-
-
-def test_ready_hook_sidecar_pointer_retargets_snapshot_save_path(tmp_path):
-    @snapclass("{self.content_file}.yml", stash=Stash(tmp_path), manual=True)
-    class Article:
-        name: str
-        content_file: str = ""
-        body: str = sidecar.text(field="content_file", default="{self.name}.md")
-
-        def __snapclass_ready__(self, *, snapshot):
-            """Snapshot is attached and sidecar pointers can retarget first save."""
-            self.body = "Ready body\n"
-
-    article = Article("dusk")
-
-    article.snapshot.save()
-
-    metadata = tmp_path / "dusk.md.yml"
-    body = tmp_path / "dusk.md"
-
-    assert article.content_file == "dusk.md"
-    assert article.snapshot.path == metadata
-    assert body.read_text(encoding="utf-8") == "Ready body\n"
-    assert metadata.read_text(encoding="utf-8") == "name: dusk\n"
+    assert not body.exists()
 
 
 def test_text_sidecar_can_use_explicit_stash(tmp_path):

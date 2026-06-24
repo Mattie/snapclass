@@ -52,14 +52,12 @@ class Collection:
         with _write_lock_for(initial_path):
             if instance.snapshot.exists:
                 instance.snapshot.load(_initial=True)
-                return instance
-        _mark_snapshot_ready(instance)
-        current_path = instance.snapshot._require_path()
-        with _write_lock_for(current_path):
-            if instance.snapshot.exists:
-                instance.snapshot.load()
             else:
-                instance.snapshot.save()
+                _mark_snapshot_ready(instance)
+                if instance.snapshot.exists:
+                    instance.snapshot.load()
+                else:
+                    instance.snapshot.save()
             return instance
 
     def all(self, *, _exclude: str = "") -> Iterator[Any]:

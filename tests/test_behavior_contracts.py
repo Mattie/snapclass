@@ -272,110 +272,56 @@ def test_ready_hook_does_not_mask_file_data_during_initial_load(tmp_path):
     assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
 
 
-def test_ready_hook_path_change_loads_existing_snapshot_before_create(tmp_path):
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
-    class Item:
-        name: str
-        value: str = ""
-        ready_seen: str = field(init=False)
-
-        def __snapclass_ready__(self, *, snapshot):
-            """Snapshot is attached and may normalize path fields before create."""
-            self.name = self.name.removeprefix("draft-")
-            self.ready_seen = self.value
-            if not self.value:
-                self.value = "ready"
-
-    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
-
-    item = Item("draft-sample")
-
-    assert item.name == "sample"
-    assert item.ready_seen == ""
-    assert item.value == "file"
-    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
-    assert not (tmp_path / "draft-sample.yml").exists()
-
-
-def test_get_or_create_rechecks_ready_changed_path_before_create(tmp_path):
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
-    class Item:
-        name: str
-        value: str = ""
-        ready_seen: str = field(init=False)
-
-        def __snapclass_ready__(self, *, snapshot):
-            """Snapshot is attached and may normalize collection lookup fields."""
-            self.name = self.name.removeprefix("draft-")
-            self.ready_seen = self.value
-            if not self.value:
-                self.value = "ready"
-
-    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
-
-    item = Item.snapshots.get_or_create("draft-sample")
-
-    assert item.name == "sample"
-    assert item.ready_seen == ""
-    assert item.value == "file"
-    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
-    assert not (tmp_path / "draft-sample.yml").exists()
-
-
-def test_load_follows_existing_ready_changed_path_before_save(tmp_path):
-    loaded_paths: list[str] = []
-
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
-    class Item:
+def test_lifecycle_hooks_cannot_retarget_snapshot_paths(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "created"))
+    class CreatedItem:
         name: str
         value: str = ""
 
         def __snapclass_ready__(self, *, snapshot):
-            """Snapshot is attached and may normalize loaded path fields."""
-            self.name = self.name.removeprefix("draft-")
+            """Snapshot pattern fields must be stable during create hooks."""
+            self.name = "sample"
 
-        def __snapclass_loaded__(self, *, snapshot, path):
-            """File data has been applied before any redirected load is followed."""
-            loaded_paths.append(path.name)
+    with pytest.raises(
+        SnapclassError,
+        match="__snapclass_ready__.*changed snapshot path",
+    ):
+        CreatedItem("draft")
 
-    (tmp_path / "draft-sample.yml").write_text("value: draft\n", encoding="utf-8")
-    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "collection"), manual=True)
+    class CollectionItem:
+        name: str
+        value: str = ""
 
-    item = Item.snapshots.get("draft-sample")
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot pattern fields must be stable during collection create hooks."""
+            self.name = "sample"
 
-    assert item.name == "sample"
-    assert item.value == "file"
-    assert loaded_paths == ["draft-sample.yml", "sample.yml"]
-    item.snapshot.save()
-    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
-    assert (tmp_path / "draft-sample.yml").read_text(encoding="utf-8") == "value: draft\n"
+    with pytest.raises(
+        SnapclassError,
+        match="__snapclass_ready__.*changed snapshot path",
+    ):
+        CollectionItem.snapshots.get_or_create("draft")
 
+    loaded_stash = tmp_path / "loaded"
+    loaded_stash.mkdir()
 
-def test_load_follows_existing_loaded_changed_path_before_save(tmp_path):
-    loaded_paths: list[str] = []
-
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
-    class Item:
+    @snapclass("{self.name}.yml", stash=Stash(loaded_stash), manual=True)
+    class LoadedItem:
         name: str
         value: str = ""
 
         def __snapclass_loaded__(self, *, snapshot, path):
-            """File data has been applied and may retarget the loaded snapshot."""
-            loaded_paths.append(path.name)
-            if path.name == "draft-sample.yml":
-                self.name = "sample"
+            """Snapshot pattern fields must be stable during load hooks."""
+            self.name = "sample"
 
-    (tmp_path / "draft-sample.yml").write_text("value: draft\n", encoding="utf-8")
-    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+    (loaded_stash / "draft.yml").write_text("value: draft\n", encoding="utf-8")
 
-    item = Item.snapshots.get("draft-sample")
-
-    assert item.name == "sample"
-    assert item.value == "file"
-    assert loaded_paths == ["draft-sample.yml", "sample.yml"]
-    item.snapshot.save()
-    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
-    assert (tmp_path / "draft-sample.yml").read_text(encoding="utf-8") == "value: draft\n"
+    with pytest.raises(
+        SnapclassError,
+        match="__snapclass_loaded__.*changed snapshot path",
+    ):
+        LoadedItem.snapshots.get("draft")
 
 
 def test_ready_hook_runs_once_but_loaded_runs_on_each_load(tmp_path):
@@ -450,7 +396,8 @@ def test_lifecycle_hook_failures_include_hook_name_and_path(tmp_path):
 
     ready_message = str(ready_error.value)
     assert "__snapclass_ready__" in ready_message
-    assert "ready.yml" in ready_message
+    assert "ReadyItem" in ready_message
+    assert "ready failed" in ready_message
 
     @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
     class LoadedItem:

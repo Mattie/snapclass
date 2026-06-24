@@ -909,9 +909,9 @@ than overwrite persisted fields.
 authoritative post-load rebuilds from YAML/JSON/TOML/text state.
 
 Lifecycle hooks run with automatic snapclass save/reload behavior suppressed
-for that instance. Hook mutations should be idempotent. Sidecar assignments made
-inside a lifecycle hook stay in memory while the hook runs; a later
-`snapshot.save()` persists them as part of that save.
+for that instance. Hook mutations should be idempotent and must not change
+fields used by the snapshot pattern. Sidecars may be read inside hooks, but
+sidecar writes should happen after the hook has returned.
 
 Use `frozen(...)` or `hooks.disabled(...)` to temporarily suspend automatic saves:
 
@@ -1132,7 +1132,8 @@ Keep code comments rare and useful. A small comment is good before tricky descri
 - Sidecar fields should stay out of YAML and `dataclasses.fields(...)`.
 - `__snapclass_ready__` should be one-shot per attached snapshot; `__snapclass_loaded__` can run on every load.
 - Lifecycle hook mutations should not trigger automatic saves or reload loops.
-- Sidecar values assigned inside lifecycle hooks should persist only through an enclosing or later explicit save.
+- Lifecycle hooks must not change fields used by the snapshot pattern; normalize those values before loading or creating snapshots.
+- Sidecars may be read inside lifecycle hooks; write sidecars after hooks return.
 - `Fresh.List`, `Fresh.Dict`, and friends must produce fresh field objects and fresh values.
 - `defaults=True` controls whether default-valued fields are written.
 - `field(default_factory=dict)` is the standard dataclass spell; `Fresh.Dict` is the snapclass-friendly shorthand.

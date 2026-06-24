@@ -434,12 +434,19 @@ def _mark_snapshot_ready(instance: object) -> None:
     snapshot = getattr(instance, "snapshot", None)
     if snapshot is None:
         return
-    _call_snapshot_lifecycle_hook(
-        instance,
-        "__snapclass_ready__",
-        snapshot=snapshot,
-        path=_snapshot_path_or_none(snapshot),
-    )
+    if getattr(snapshot, "_ready", False):
+        return
+    snapshot._ready = True
+    try:
+        _call_snapshot_lifecycle_hook(
+            instance,
+            "__snapclass_ready__",
+            snapshot=snapshot,
+            path=_snapshot_path_or_none(snapshot),
+        )
+    except Exception:
+        snapshot._ready = False
+        raise
 
 
 def _mark_snapshot_loaded(instance: object, path: Path) -> None:
@@ -544,6 +551,10 @@ def _install(cls: type, config: Config) -> None:
                 pending[name] = value
                 object.__setattr__(self, _PENDING_SIDECARS_ATTR, pending)
                 return
+            if getattr(self, "_snapclass_hooks_suppressed", False):
+                sidecar_descriptor._set_override(self, value)
+                return
+            sidecar_descriptor._clear_override(self)
             sidecar_descriptor.snapshot(self).write(value)
             return
         snapshot = getattr(self, "snapshot", None)
@@ -680,6 +691,7 @@ class Snapshot:
         self._last_mtime: float | None = None
         self._loaded_data: dict[str, Any] | None = None
         self._loaded_path: Path | None = None
+        self._ready = False
 
     @property
     def classname(self) -> str:
@@ -861,6 +873,7 @@ class Snapshot:
         object.__setattr__(self._instance, "_snapclass_loading", True)
         try:
             try:
+                sidecar.clear_overrides(self._instance)
                 _apply_data(self._instance, data, preserve_non_default=_initial)
             except _CoercionError as exc:
                 raise SnapclassError(_schema_mismatch_message(current_path, exc)) from exc

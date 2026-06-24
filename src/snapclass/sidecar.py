@@ -12,6 +12,7 @@ from .stash import Stash
 _Kind = Literal["text", "bytes"]
 _StashLike = Stash | str | os.PathLike[str]
 _MISSING = object()
+_OVERRIDES_ATTR = "__snapclass_sidecar_overrides__"
 
 
 class SidecarMissingError(FileNotFoundError):
@@ -83,6 +84,10 @@ class SidecarDescriptor:
     encoding: str = "utf-8"
     stash: Stash | None = None
 
+    def __set_name__(self, owner: type, name: str) -> None:
+        """Remember the model attribute name for suppressed in-memory values."""
+        object.__setattr__(self, "_name", name)
+
     def __get__(self, instance: object | None, owner: type | None = None):
         if instance is None:
             return self
@@ -96,9 +101,55 @@ class SidecarDescriptor:
 
     def value(self, instance: object) -> "SidecarText | SidecarBytes":
         snapshot = self.snapshot(instance)
+        override = self._override_value(instance)
+        if override is not _MISSING:
+            if self.kind == "text":
+                return SidecarText(cast(str, override), snapshot)
+            return SidecarBytes(cast(builtins.bytes, override), snapshot)
         if self.kind == "text":
             return SidecarText(snapshot.read(default=""), snapshot)
         return SidecarBytes(snapshot.read(default=b""), snapshot)
+
+    def _set_override(self, instance: object, value: str | builtins.bytes) -> None:
+        """Store a sidecar assignment in memory without writing sidecar files."""
+        if self.kind == "text" and not isinstance(value, str):
+            raise TypeError("Text sidecars require str values")
+        if self.kind == "bytes" and not isinstance(
+            value,
+            (builtins.bytes, bytearray, memoryview),
+        ):
+            raise TypeError("Bytes sidecars require bytes-like values")
+        name = getattr(self, "_name", None)
+        if name is None:
+            return
+        overrides = dict(getattr(instance, _OVERRIDES_ATTR, {}))
+        overrides[name] = (
+            builtins.bytes(value) if self.kind == "bytes" else value
+        )
+        object.__setattr__(instance, _OVERRIDES_ATTR, overrides)
+
+    def _clear_override(self, instance: object) -> None:
+        """Remove an in-memory sidecar assignment for this descriptor."""
+        name = getattr(self, "_name", None)
+        if name is None:
+            return
+        overrides = dict(getattr(instance, _OVERRIDES_ATTR, {}))
+        if name not in overrides:
+            return
+        del overrides[name]
+        object.__setattr__(instance, _OVERRIDES_ATTR, overrides)
+
+    def _override_value(self, instance: object) -> object:
+        """Return a suppressed in-memory value or the missing sentinel."""
+        name = getattr(self, "_name", None)
+        if name is None:
+            return _MISSING
+        return getattr(instance, _OVERRIDES_ATTR, {}).get(name, _MISSING)
+
+
+def clear_overrides(instance: object) -> None:
+    """Clear all suppressed sidecar assignments for an instance."""
+    object.__setattr__(instance, _OVERRIDES_ATTR, {})
 
 
 class SidecarText(str):

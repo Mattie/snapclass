@@ -272,6 +272,32 @@ def test_ready_hook_does_not_mask_file_data_during_initial_load(tmp_path):
     assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
 
 
+def test_ready_hook_runs_once_but_loaded_runs_on_each_load(tmp_path):
+    calls: list[str] = []
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and ready runs once per attached snapshot."""
+            calls.append("ready")
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and loaded runs for each load."""
+            calls.append("loaded")
+
+    (tmp_path / "sample.yml").write_text("value: first\n", encoding="utf-8")
+    item = Item.snapshots.get("sample")
+    (tmp_path / "sample.yml").write_text("value: second\n", encoding="utf-8")
+
+    item.snapshot.load()
+
+    assert item.value == "second"
+    assert calls == ["ready", "loaded", "loaded"]
+
+
 def test_lifecycle_hook_suppression_is_per_instance(tmp_path):
     @snapclass("{self.name}.yml", stash=Stash(tmp_path / "other"))
     class Other:

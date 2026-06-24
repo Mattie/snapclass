@@ -56,6 +56,40 @@ def test_sidecar_constructor_values_are_visible_before_ready_hook_runs(tmp_path)
     assert observed == ["# Dusk Court\n"]
 
 
+def test_sidecar_assignment_in_loaded_hook_does_not_rewrite_files(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+    hook_calls: list[str] = []
+
+    @snapclass("{self.slug}/article.yml", stash=articles, manual=True)
+    class Article:
+        slug: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and sidecar hook writes stay in memory."""
+            if not hook_calls:
+                self.body = "Hook body\n"
+            hook_calls.append("loaded")
+
+    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text("content_file: dusk-court.md\n", encoding="utf-8")
+    body.write_text("File body\n", encoding="utf-8")
+
+    article = Article.snapshots.get("dusk-court")
+
+    assert article.body == "Hook body\n"
+    assert body.read_text(encoding="utf-8") == "File body\n"
+    assert metadata.read_text(encoding="utf-8") == "content_file: dusk-court.md\n"
+
+    article.snapshot.load()
+
+    assert article.body == "File body\n"
+    assert hook_calls == ["loaded", "loaded"]
+
+
 def test_text_sidecar_can_use_explicit_stash(tmp_path):
     app = Stash(tmp_path / "world")
     articles = app / "article"

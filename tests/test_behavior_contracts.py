@@ -6,7 +6,7 @@ from io import StringIO
 import pytest
 from ruamel.yaml import YAML as RuamelYAML
 
-from snapclass import SnapclassError, Stash, snapclass, hooks
+from snapclass import SnapclassError, Stash, snapclass, hooks, sessions
 
 
 def test_snapclass_types_behave_like_plain_yaml_values():
@@ -248,6 +248,60 @@ def test_lifecycle_hook_mutations_do_not_trigger_automatic_save_loops(tmp_path):
     assert item.value == "hooked"
     assert item.events == ["loaded"]
     assert path.read_text(encoding="utf-8") == "value: file\nevents: []\n"
+
+
+def test_ready_hook_does_not_mask_file_data_during_initial_load(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item:
+        name: str
+        value: str = ""
+        ready_seen: str = field(init=False)
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and file data is visible when present."""
+            self.ready_seen = self.value
+            if not self.value:
+                self.value = "ready"
+
+    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+
+    item = Item("sample")
+
+    assert item.ready_seen == "file"
+    assert item.value == "file"
+    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
+
+
+def test_lifecycle_hook_suppression_is_per_instance(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "other"))
+    class Other:
+        name: str
+        value: str = ""
+
+    other = Other("target")
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "items"))
+    class Item:
+        name: str
+        value: str = ""
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and only this instance is suppressed."""
+            assert sessions.HOOKS_ENABLED is True
+            self.value = "hooked"
+            other.value = "updated"
+
+    item_path = tmp_path / "items" / "sample.yml"
+    item_path.parent.mkdir()
+    item_path.write_text("value: file\n", encoding="utf-8")
+
+    item = Item("sample")
+
+    assert item.value == "hooked"
+    assert item_path.read_text(encoding="utf-8") == "value: file\n"
+    assert (tmp_path / "other" / "target.yml").read_text(encoding="utf-8") == (
+        "value: updated\n"
+    )
 
 
 def test_lifecycle_hook_failures_include_hook_name_and_path(tmp_path):

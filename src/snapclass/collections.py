@@ -27,12 +27,11 @@ class Collection:
         return Collection(self.model, _coerce_stash(stash))
 
     def get(self, *args: Any, **kwargs: Any) -> Any:
-        from .schemas import _attach_snapshot, _mark_snapshot_ready
+        from .schemas import _attach_snapshot
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         instance = self._empty_instance(*args, **kwargs)
         _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
-        _mark_snapshot_ready(instance)
         instance.snapshot.load(_initial=True)
         return instance
 
@@ -49,11 +48,11 @@ class Collection:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         instance = self._empty_instance(*args, **kwargs, include_defaults=True)
         _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
-        _mark_snapshot_ready(instance)
         with _write_lock_for(instance.snapshot._require_path()):
             if instance.snapshot.exists:
                 instance.snapshot.load(_initial=True)
             else:
+                _mark_snapshot_ready(instance)
                 instance.snapshot.save()
             return instance
 
@@ -62,7 +61,6 @@ class Collection:
             _PatternMatcher,
             _attach_snapshot,
             _has_path_value,
-            _mark_snapshot_ready,
         )
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
@@ -84,7 +82,6 @@ class Collection:
                 instance = self._empty_instance(*values)
                 _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
                 instance.snapshot.path = path
-                _mark_snapshot_ready(instance)
                 instance.snapshot.load(_initial=True)
                 yield instance
             else:

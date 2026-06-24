@@ -355,6 +355,7 @@ def sync(
     if not hasattr(cls, "__snapclass_config__"):
         _install(cls, config)
     _attach_snapshot(instance, config)
+    _mark_snapshot_ready(instance)
     if _auto_enabled(config):
         instance.snapshot.save()
     return instance
@@ -428,6 +429,79 @@ def frozen(*snapshots: object):
                     snapshot.save()
 
 
+def _mark_snapshot_ready(instance: object) -> None:
+    """Run ``__snapclass_ready__`` after snapshot attachment and setup settle."""
+    snapshot = getattr(instance, "snapshot", None)
+    if snapshot is None:
+        return
+    _call_snapshot_lifecycle_hook(
+        instance,
+        "__snapclass_ready__",
+        snapshot=snapshot,
+        path=_snapshot_path_or_none(snapshot),
+    )
+
+
+def _mark_snapshot_loaded(instance: object, path: Path) -> None:
+    """Run ``__snapclass_loaded__`` after file data is applied and tracked."""
+    snapshot = getattr(instance, "snapshot", None)
+    if snapshot is None:
+        return
+    _call_snapshot_lifecycle_hook(
+        instance,
+        "__snapclass_loaded__",
+        snapshot=snapshot,
+        path=path,
+    )
+
+
+def _call_snapshot_lifecycle_hook(
+    instance: object,
+    hook_name: str,
+    *,
+    snapshot: "Snapshot",
+    path: Path | None = None,
+) -> None:
+    """Invoke a snapclass lifecycle hook with suppressed autosave/reload hooks."""
+    hook = getattr(instance, hook_name, None)
+    if hook is None:
+        return
+    try:
+        with _snapclass_hook_context(instance):
+            if hook_name == "__snapclass_loaded__":
+                hook(snapshot=snapshot, path=path)
+            else:
+                hook(snapshot=snapshot)
+    except Exception as exc:
+        location = f" at {path}" if path is not None else ""
+        raise SnapclassError(
+            f"Failed to run {hook_name} for {instance.__class__.__name__}"
+            f"{location}: {exc}"
+        ) from exc
+
+
+@contextmanager
+def _snapclass_hook_context(instance: object) -> Iterator[None]:
+    """Suppress automatic snapclass saves and reloads during lifecycle hooks."""
+    previous_hooks = sessions.HOOKS_ENABLED
+    previous_loading = getattr(instance, "_snapclass_loading", False)
+    sessions.HOOKS_ENABLED = False
+    object.__setattr__(instance, "_snapclass_loading", True)
+    try:
+        yield
+    finally:
+        object.__setattr__(instance, "_snapclass_loading", previous_loading)
+        sessions.HOOKS_ENABLED = previous_hooks
+
+
+def _snapshot_path_or_none(snapshot: "Snapshot") -> Path | None:
+    """Return the resolved snapshot path when it can be used for diagnostics."""
+    try:
+        return snapshot.path
+    except Exception:
+        return None
+
+
 def _install(cls: type, config: Config) -> None:
     cls.__snapclass_config__ = config
     cls.snapshots = CollectionDescriptor()
@@ -449,6 +523,7 @@ def _install(cls: type, config: Config) -> None:
         _apply_sidecar_values(self, pending_sidecars, save_metadata=False)
         _apply_sidecar_values(self, sidecar_values, save_metadata=False)
         object.__setattr__(self, "_snapclass_initializing", False)
+        _mark_snapshot_ready(self)
         if _auto_enabled(config):
             if self.snapshot.exists:
                 self.snapshot.load(_initial=True)
@@ -794,6 +869,7 @@ class Snapshot:
             self._loaded_path = current_path
             self._last_text = text
             self.modified = False
+            _mark_snapshot_loaded(self._instance, current_path)
         finally:
             object.__setattr__(self._instance, "_snapclass_loading", False)
 

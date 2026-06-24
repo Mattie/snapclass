@@ -27,11 +27,12 @@ class Collection:
         return Collection(self.model, _coerce_stash(stash))
 
     def get(self, *args: Any, **kwargs: Any) -> Any:
-        from .schemas import _attach_snapshot
+        from .schemas import _attach_snapshot, _mark_snapshot_ready
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         instance = self._empty_instance(*args, **kwargs)
         _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
+        _mark_snapshot_ready(instance)
         instance.snapshot.load(_initial=True)
         return instance
 
@@ -43,11 +44,12 @@ class Collection:
             return None
 
     def get_or_create(self, *args: Any, **kwargs: Any) -> Any:
-        from .schemas import _attach_snapshot, _write_lock_for
+        from .schemas import _attach_snapshot, _mark_snapshot_ready, _write_lock_for
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         instance = self._empty_instance(*args, **kwargs, include_defaults=True)
         _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
+        _mark_snapshot_ready(instance)
         with _write_lock_for(instance.snapshot._require_path()):
             if instance.snapshot.exists:
                 instance.snapshot.load(_initial=True)
@@ -56,7 +58,12 @@ class Collection:
             return instance
 
     def all(self, *, _exclude: str = "") -> Iterator[Any]:
-        from .schemas import _PatternMatcher, _attach_snapshot, _has_path_value
+        from .schemas import (
+            _PatternMatcher,
+            _attach_snapshot,
+            _has_path_value,
+            _mark_snapshot_ready,
+        )
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         if not self.model.__snapclass_config__.pattern:
@@ -76,7 +83,9 @@ class Collection:
             if matcher.has_recursive_wildcard or _has_path_value(values):
                 instance = self._empty_instance(*values)
                 _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
-                instance.snapshot.load(path, _initial=True)
+                instance.snapshot.path = path
+                _mark_snapshot_ready(instance)
+                instance.snapshot.load(_initial=True)
                 yield instance
             else:
                 yield self.get(*values)

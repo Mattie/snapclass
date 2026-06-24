@@ -38,6 +38,24 @@ def test_text_sidecar_values_read_and_write_next_to_metadata(tmp_path):
     assert article.body.snapshot.stash == articles
 
 
+def test_sidecar_constructor_values_are_visible_before_ready_hook_runs(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+    observed: list[str] = []
+
+    @snapclass("{self.slug}/article.yml", stash=articles, manual=True)
+    class Article:
+        slug: str
+        body: str = sidecar.text("{self.slug}.md")
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and sidecar constructor values are visible."""
+            observed.append(self.body)
+
+    Article("dusk-court", body="# Dusk Court\n")
+
+    assert observed == ["# Dusk Court\n"]
+
+
 def test_text_sidecar_can_use_explicit_stash(tmp_path):
     app = Stash(tmp_path / "world")
     articles = app / "article"

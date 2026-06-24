@@ -880,6 +880,39 @@ By default, snapclass hooks can save changed instances automatically according t
 
 Use `manual=True` for models where mutation should stay in memory until saved.
 
+Use lifecycle hooks when a model needs transient runtime state around snapshot
+attachment and file loads:
+
+```python
+@snapclass("{self.name}.yml")
+class Chat:
+    name: str
+    runtime: object | None = None
+
+    def __snapclass_ready__(self, *, snapshot):
+        """Snapshot is attached and the object is usable."""
+        if self.runtime is None:
+            self.runtime = build_runtime_defaults()
+
+    def __snapclass_loaded__(self, *, snapshot, path):
+        """File data has been applied to the object."""
+        self.runtime = rebuild_runtime_from_loaded_state(self)
+```
+
+`__snapclass_ready__(self, *, snapshot)` runs once per attached snapshot after
+the object is usable. On existing-file loads, file data may already be applied
+before `ready` runs, so `ready` should establish missing live defaults rather
+than overwrite persisted fields.
+
+`__snapclass_loaded__(self, *, snapshot, path)` runs after each successful
+`Snapshot.load()`, including `obj.load()` and `snapshot.text = ...`. Use it for
+authoritative post-load rebuilds from YAML/JSON/TOML/text state.
+
+Lifecycle hooks run with automatic snapclass save/reload behavior suppressed
+for that instance. Hook mutations should be idempotent. Sidecar assignments made
+inside a lifecycle hook stay in memory while the hook runs; a later
+`snapshot.save()` persists them as part of that save.
+
 Use `frozen(...)` or `hooks.disabled(...)` to temporarily suspend automatic saves:
 
 ```python
@@ -1046,6 +1079,7 @@ Prefer targeted tests around the public story:
 - Serializer behavior for downstream-inspired cases.
 - Collection stash binding.
 - Unknown data, migration, defaults, minimal diffs, write delay, and conflict behavior.
+- Lifecycle hook ordering, idempotency, autosave suppression, sidecar behavior, and file-backed reloads.
 
 For sidecars, assert both value behavior and snapshot behavior:
 
@@ -1096,6 +1130,9 @@ Keep code comments rare and useful. A small comment is good before tricky descri
 - Sidecar values should act like `str` or `bytes`, with `.snapshot` for file details.
 - Sidecars default to the model's stash; explicit sidecar stashes can override or compose under it.
 - Sidecar fields should stay out of YAML and `dataclasses.fields(...)`.
+- `__snapclass_ready__` should be one-shot per attached snapshot; `__snapclass_loaded__` can run on every load.
+- Lifecycle hook mutations should not trigger automatic saves or reload loops.
+- Sidecar values assigned inside lifecycle hooks should persist only through an enclosing or later explicit save.
 - `Fresh.List`, `Fresh.Dict`, and friends must produce fresh field objects and fresh values.
 - `defaults=True` controls whether default-valued fields are written.
 - `field(default_factory=dict)` is the standard dataclass spell; `Fresh.Dict` is the snapclass-friendly shorthand.

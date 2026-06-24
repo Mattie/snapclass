@@ -866,11 +866,15 @@ class Snapshot:
         path: str | os.PathLike[str] | None = None,
         *,
         _initial: bool = False,
+        _visited_paths: set[Path] | None = None,
     ) -> None:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         if path is not None:
             self.path = path
         current_path = self._require_path()
+        if _visited_paths is None:
+            _visited_paths = set()
+        _visited_paths.add(current_path)
         text = current_path.read_text(encoding="utf-8")
         try:
             data = _load_data(current_path, text, self._config, self.stash)
@@ -890,8 +894,25 @@ class Snapshot:
             self.modified = False
             _mark_snapshot_ready(self._instance)
             _mark_snapshot_loaded(self._instance, current_path)
+            self._reload_after_lifecycle_path_change(current_path, _visited_paths)
         finally:
             object.__setattr__(self._instance, "_snapclass_loading", False)
+
+    def _reload_after_lifecycle_path_change(
+        self,
+        loaded_path: Path,
+        visited_paths: set[Path],
+    ) -> None:
+        """Load an existing post-hook path before returning from a retargeted load."""
+        current_path = self._require_path()
+        if current_path == loaded_path or not current_path.exists():
+            return
+        if current_path in visited_paths:
+            raise SnapclassError(
+                "Lifecycle hooks changed snapshot path in a load cycle: "
+                f"{loaded_path} -> {current_path}"
+            )
+        self.load(_visited_paths=visited_paths)
 
     def _require_path(self) -> Path:
         try:

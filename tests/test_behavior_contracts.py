@@ -322,6 +322,62 @@ def test_get_or_create_rechecks_ready_changed_path_before_create(tmp_path):
     assert not (tmp_path / "draft-sample.yml").exists()
 
 
+def test_load_follows_existing_ready_changed_path_before_save(tmp_path):
+    loaded_paths: list[str] = []
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and may normalize loaded path fields."""
+            self.name = self.name.removeprefix("draft-")
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied before any redirected load is followed."""
+            loaded_paths.append(path.name)
+
+    (tmp_path / "draft-sample.yml").write_text("value: draft\n", encoding="utf-8")
+    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+
+    item = Item.snapshots.get("draft-sample")
+
+    assert item.name == "sample"
+    assert item.value == "file"
+    assert loaded_paths == ["draft-sample.yml", "sample.yml"]
+    item.snapshot.save()
+    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
+    assert (tmp_path / "draft-sample.yml").read_text(encoding="utf-8") == "value: draft\n"
+
+
+def test_load_follows_existing_loaded_changed_path_before_save(tmp_path):
+    loaded_paths: list[str] = []
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and may retarget the loaded snapshot."""
+            loaded_paths.append(path.name)
+            if path.name == "draft-sample.yml":
+                self.name = "sample"
+
+    (tmp_path / "draft-sample.yml").write_text("value: draft\n", encoding="utf-8")
+    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+
+    item = Item.snapshots.get("draft-sample")
+
+    assert item.name == "sample"
+    assert item.value == "file"
+    assert loaded_paths == ["draft-sample.yml", "sample.yml"]
+    item.snapshot.save()
+    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
+    assert (tmp_path / "draft-sample.yml").read_text(encoding="utf-8") == "value: draft\n"
+
+
 def test_ready_hook_runs_once_but_loaded_runs_on_each_load(tmp_path):
     calls: list[str] = []
 

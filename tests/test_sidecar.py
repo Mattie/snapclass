@@ -90,6 +90,61 @@ def test_sidecar_assignment_in_loaded_hook_does_not_rewrite_files(tmp_path):
     assert hook_calls == ["loaded", "loaded"]
 
 
+def test_ready_hook_sidecar_assignment_persists_on_initial_auto_save(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+
+    @snapclass("{self.slug}/article.yml", stash=articles)
+    class Article:
+        slug: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and initial sidecar state can be prepared."""
+            self.body = "Ready body\n"
+
+    article = Article("dusk-court")
+
+    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+
+    assert article.body == "Ready body\n"
+    assert body.read_text(encoding="utf-8") == "Ready body\n"
+    assert metadata.read_text(encoding="utf-8") == "content_file: dusk-court.md\n"
+    assert Article.snapshots.get("dusk-court").body == "Ready body\n"
+
+
+def test_loaded_hook_sidecar_assignment_persists_on_explicit_save(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+    hook_calls: list[str] = []
+
+    @snapclass("{self.slug}/article.yml", stash=articles, manual=True)
+    class Article:
+        slug: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data is applied before sidecar changes are explicitly saved."""
+            if not hook_calls:
+                self.body = "Hook body\n"
+            hook_calls.append("loaded")
+
+    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text("content_file: dusk-court.md\n", encoding="utf-8")
+    body.write_text("File body\n", encoding="utf-8")
+
+    article = Article.snapshots.get("dusk-court")
+    article.snapshot.save()
+    reloaded = Article.snapshots.get("dusk-court")
+
+    assert body.read_text(encoding="utf-8") == "Hook body\n"
+    assert metadata.read_text(encoding="utf-8") == "content_file: dusk-court.md\n"
+    assert reloaded.body == "Hook body\n"
+
+
 def test_text_sidecar_can_use_explicit_stash(tmp_path):
     app = Stash(tmp_path / "world")
     articles = app / "article"

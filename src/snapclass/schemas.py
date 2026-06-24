@@ -836,6 +836,7 @@ class Snapshot:
         with _write_lock_for(current_path):
             self._check_write_conflict(current_path)
             sidecar.reconcile_before_save(self._instance, current_path)
+            sidecar.flush_overrides(self._instance)
             data = _to_data(
                 self._instance,
                 self._config,

@@ -152,6 +152,22 @@ def clear_overrides(instance: object) -> None:
     object.__setattr__(instance, _OVERRIDES_ATTR, {})
 
 
+def flush_overrides(instance: object) -> None:
+    """Write suppressed sidecar assignments as part of an enclosing save."""
+    overrides = dict(getattr(instance, _OVERRIDES_ATTR, {}))
+    if not overrides:
+        return
+    descriptors = {
+        getattr(descriptor, "_name", None): descriptor
+        for descriptor in _descriptors_for(type(instance))
+    }
+    for name, value in overrides.items():
+        descriptor = descriptors.get(name)
+        if descriptor is not None:
+            descriptor.snapshot(instance).write(value, save_metadata=False)
+            descriptor._clear_override(instance)
+
+
 class SidecarText(str):
     snapshot: "SidecarSnapshot"
 

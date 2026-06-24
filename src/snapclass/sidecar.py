@@ -184,12 +184,14 @@ def flush_overrides(instance: object) -> None:
             descriptor._clear_override(instance)
 
 
-def _override_descriptors(instance: object) -> dict[str | None, SidecarDescriptor]:
+def _override_descriptors(instance: object) -> dict[str, SidecarDescriptor]:
     """Return sidecar descriptors keyed by their owning model attribute name."""
-    return {
-        getattr(descriptor, "_name", None): descriptor
-        for descriptor in _descriptors_for(type(instance))
-    }
+    descriptors: dict[str, SidecarDescriptor] = {}
+    for descriptor in _descriptors_for(type(instance)):
+        name = getattr(descriptor, "_name", None)
+        if name is not None:
+            descriptors[name] = descriptor
+    return descriptors
 
 
 class SidecarText(str):

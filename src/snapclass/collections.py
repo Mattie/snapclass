@@ -48,11 +48,17 @@ class Collection:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         instance = self._empty_instance(*args, **kwargs, include_defaults=True)
         _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
-        with _write_lock_for(instance.snapshot._require_path()):
+        initial_path = instance.snapshot._require_path()
+        with _write_lock_for(initial_path):
             if instance.snapshot.exists:
                 instance.snapshot.load(_initial=True)
+                return instance
+        _mark_snapshot_ready(instance)
+        current_path = instance.snapshot._require_path()
+        with _write_lock_for(current_path):
+            if instance.snapshot.exists:
+                instance.snapshot.load()
             else:
-                _mark_snapshot_ready(instance)
                 instance.snapshot.save()
             return instance
 

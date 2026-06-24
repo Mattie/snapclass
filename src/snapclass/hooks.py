@@ -38,6 +38,8 @@ def enabled(snapshot: Any, args: Iterable[Any]) -> bool:
         return False
     if getattr(snapshot, "manual", False):
         return False
+    if getattr(getattr(snapshot, "_instance", None), "_snapclass_hooks_suppressed", False):
+        return False
     name = _first_string_arg(args)
     if name is None:
         return True

@@ -6,7 +6,7 @@ from io import StringIO
 import pytest
 from ruamel.yaml import YAML as RuamelYAML
 
-from snapclass import Stash, snapclass, hooks
+from snapclass import SnapclassError, Stash, snapclass, hooks, sessions
 
 
 def test_snapclass_types_behave_like_plain_yaml_values():
@@ -150,3 +150,269 @@ def test_hooks_disabled_batches_and_flushes_named_snapshots(tmp_path):
         "events:\n"
         "  - nested\n"
     )
+
+
+def test_snapshots_get_initializes_init_false_fields_before_loaded(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+        transient: list[str] = field(init=False)
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and transient state can be initialized."""
+            self.transient = ["ready"]
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and transient state can be reused."""
+            self.transient.append(f"loaded:{path.name}")
+
+    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+
+    item = Item.snapshots.get("sample")
+
+    assert item.value == "file"
+    assert item.transient == ["ready", "loaded:sample.yml"]
+
+
+def test_snapshots_get_or_create_missing_file_runs_ready_without_loaded(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = "created"
+        transient: list[str] = field(init=False)
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and transient state can be initialized."""
+            self.transient = ["ready"]
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and transient state can be reused."""
+            self.transient.append("loaded")
+
+    item = Item.snapshots.get_or_create("sample")
+
+    assert item.value == "created"
+    assert item.transient == ["ready"]
+    assert (tmp_path / "sample.yml").exists()
+
+
+def test_loaded_hook_runs_for_explicit_loads_and_text_setter(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+        loaded_paths: list[str] = field(default_factory=list)
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and transient state can be reused."""
+            self.loaded_paths.append(path.name)
+
+    first = Item("first")
+    (tmp_path / "first.yml").write_text("value: snapshot\n", encoding="utf-8")
+    first.snapshot.load()
+
+    second = Item("second")
+    (tmp_path / "second.yml").write_text("value: object\n", encoding="utf-8")
+    second.load()
+
+    third = Item("third")
+    third.snapshot.save()
+    third.snapshot.text = "value: text\n"
+
+    assert first.loaded_paths == ["first.yml"]
+    assert second.loaded_paths == ["second.yml"]
+    assert third.loaded_paths == ["third.yml"]
+    assert first.value == "snapshot"
+    assert second.value == "object"
+    assert third.value == "text"
+
+
+def test_lifecycle_hook_mutations_do_not_trigger_automatic_save_loops(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item:
+        name: str
+        value: str = ""
+        events: list[str] = field(default_factory=list)
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and transient state can be reused."""
+            self.value = "hooked"
+            self.events.append("loaded")
+
+    path = tmp_path / "sample.yml"
+    path.write_text("value: file\nevents: []\n", encoding="utf-8")
+
+    item = Item("sample")
+
+    assert item.value == "hooked"
+    assert item.events == ["loaded"]
+    assert path.read_text(encoding="utf-8") == "value: file\nevents: []\n"
+
+
+def test_ready_hook_does_not_mask_file_data_during_initial_load(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item:
+        name: str
+        value: str = ""
+        ready_seen: str = field(init=False)
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and file data is visible when present."""
+            self.ready_seen = self.value
+            if not self.value:
+                self.value = "ready"
+
+    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+
+    item = Item("sample")
+
+    assert item.ready_seen == "file"
+    assert item.value == "file"
+    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
+
+
+def test_lifecycle_hooks_cannot_retarget_snapshot_paths(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "created"))
+    class CreatedItem:
+        name: str
+        value: str = ""
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot pattern fields must be stable during create hooks."""
+            self.name = "sample"
+
+    with pytest.raises(
+        SnapclassError,
+        match="__snapclass_ready__.*changed snapshot path",
+    ):
+        CreatedItem("draft")
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "collection"), manual=True)
+    class CollectionItem:
+        name: str
+        value: str = ""
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot pattern fields must be stable during collection create hooks."""
+            self.name = "sample"
+
+    with pytest.raises(
+        SnapclassError,
+        match="__snapclass_ready__.*changed snapshot path",
+    ):
+        CollectionItem.snapshots.get_or_create("draft")
+
+    loaded_stash = tmp_path / "loaded"
+    loaded_stash.mkdir()
+
+    @snapclass("{self.name}.yml", stash=Stash(loaded_stash), manual=True)
+    class LoadedItem:
+        name: str
+        value: str = ""
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """Snapshot pattern fields must be stable during load hooks."""
+            self.name = "sample"
+
+    (loaded_stash / "draft.yml").write_text("value: draft\n", encoding="utf-8")
+
+    with pytest.raises(
+        SnapclassError,
+        match="__snapclass_loaded__.*changed snapshot path",
+    ):
+        LoadedItem.snapshots.get("draft")
+
+
+def test_ready_hook_runs_once_but_loaded_runs_on_each_load(tmp_path):
+    calls: list[str] = []
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and ready runs once per attached snapshot."""
+            calls.append("ready")
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and loaded runs for each load."""
+            calls.append("loaded")
+
+    (tmp_path / "sample.yml").write_text("value: first\n", encoding="utf-8")
+    item = Item.snapshots.get("sample")
+    (tmp_path / "sample.yml").write_text("value: second\n", encoding="utf-8")
+
+    item.snapshot.load()
+
+    assert item.value == "second"
+    assert calls == ["ready", "loaded", "loaded"]
+
+
+def test_lifecycle_hook_suppression_is_per_instance(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "other"))
+    class Other:
+        name: str
+        value: str = ""
+
+    other = Other("target")
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "items"))
+    class Item:
+        name: str
+        value: str = ""
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and only this instance is suppressed."""
+            assert sessions.HOOKS_ENABLED is True
+            self.value = "hooked"
+            other.value = "updated"
+
+    item_path = tmp_path / "items" / "sample.yml"
+    item_path.parent.mkdir()
+    item_path.write_text("value: file\n", encoding="utf-8")
+
+    item = Item("sample")
+
+    assert item.value == "hooked"
+    assert item_path.read_text(encoding="utf-8") == "value: file\n"
+    assert (tmp_path / "other" / "target.yml").read_text(encoding="utf-8") == (
+        "value: updated\n"
+    )
+
+
+def test_lifecycle_hook_failures_include_hook_name_and_path(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class ReadyItem:
+        name: str
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and transient state can be initialized."""
+            raise RuntimeError("ready failed")
+
+    with pytest.raises(SnapclassError) as ready_error:
+        ReadyItem("ready")
+
+    ready_message = str(ready_error.value)
+    assert "__snapclass_ready__" in ready_message
+    assert "ready.yml" in ready_message
+    assert "ReadyItem" in ready_message
+    assert "ready failed" in ready_message
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class LoadedItem:
+        name: str
+
+        def __snapclass_loaded__(self, *, snapshot, path):
+            """File data has been applied and transient state can be reused."""
+            raise RuntimeError("loaded failed")
+
+    (tmp_path / "loaded.yml").write_text("", encoding="utf-8")
+
+    with pytest.raises(SnapclassError) as loaded_error:
+        LoadedItem.snapshots.get("loaded")
+
+    loaded_message = str(loaded_error.value)
+    assert "__snapclass_loaded__" in loaded_message
+    assert "loaded.yml" in loaded_message

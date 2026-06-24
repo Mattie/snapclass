@@ -38,6 +38,43 @@ def test_text_sidecar_values_read_and_write_next_to_metadata(tmp_path):
     assert article.body.snapshot.stash == articles
 
 
+def test_sidecar_constructor_values_are_visible_before_ready_hook_runs(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+    observed: list[str] = []
+
+    @snapclass("{self.slug}/article.yml", stash=articles, manual=True)
+    class Article:
+        slug: str
+        body: str = sidecar.text("{self.slug}.md")
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and sidecar constructor values are visible."""
+            observed.append(self.body)
+
+    Article("dusk-court", body="# Dusk Court\n")
+
+    assert observed == ["# Dusk Court\n"]
+
+
+def test_sidecar_assignment_in_lifecycle_hook_raises_without_writing(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+
+    @snapclass("{self.slug}/article.yml", stash=articles, manual=True)
+    class Article:
+        slug: str
+        body: str = sidecar.text("{self.slug}.md")
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot hooks may read sidecars, but writes happen after hooks."""
+            self.body = "Ready body\n"
+
+    with pytest.raises(SnapclassError, match="Cannot assign sidecar 'body'"):
+        Article("dusk-court")
+
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+    assert not body.exists()
+
+
 def test_text_sidecar_can_use_explicit_stash(tmp_path):
     app = Stash(tmp_path / "world")
     articles = app / "article"

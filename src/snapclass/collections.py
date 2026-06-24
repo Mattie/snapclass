@@ -43,20 +43,29 @@ class Collection:
             return None
 
     def get_or_create(self, *args: Any, **kwargs: Any) -> Any:
-        from .schemas import _attach_snapshot, _write_lock_for
+        from .schemas import _attach_snapshot, _mark_snapshot_ready, _write_lock_for
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         instance = self._empty_instance(*args, **kwargs, include_defaults=True)
         _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
-        with _write_lock_for(instance.snapshot._require_path()):
+        initial_path = instance.snapshot._require_path()
+        with _write_lock_for(initial_path):
             if instance.snapshot.exists:
                 instance.snapshot.load(_initial=True)
             else:
-                instance.snapshot.save()
+                _mark_snapshot_ready(instance)
+                if instance.snapshot.exists:
+                    instance.snapshot.load()
+                else:
+                    instance.snapshot.save()
             return instance
 
     def all(self, *, _exclude: str = "") -> Iterator[Any]:
-        from .schemas import _PatternMatcher, _attach_snapshot, _has_path_value
+        from .schemas import (
+            _PatternMatcher,
+            _attach_snapshot,
+            _has_path_value,
+        )
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         if not self.model.__snapclass_config__.pattern:
@@ -76,7 +85,8 @@ class Collection:
             if matcher.has_recursive_wildcard or _has_path_value(values):
                 instance = self._empty_instance(*values)
                 _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
-                instance.snapshot.load(path, _initial=True)
+                instance.snapshot.path = path
+                instance.snapshot.load(_initial=True)
                 yield instance
             else:
                 yield self.get(*values)

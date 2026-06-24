@@ -355,7 +355,8 @@ def sync(
     if not hasattr(cls, "__snapclass_config__"):
         _install(cls, config)
     _attach_snapshot(instance, config)
-    if _auto_enabled(config):
+    _mark_snapshot_ready(instance)
+    if _auto_enabled(config, instance):
         instance.snapshot.save()
     return instance
 
@@ -428,6 +429,117 @@ def frozen(*snapshots: object):
                     snapshot.save()
 
 
+def _mark_snapshot_ready(instance: object) -> None:
+    """Run ``__snapclass_ready__`` after snapshot attachment and setup settle."""
+    snapshot = getattr(instance, "snapshot", None)
+    if snapshot is None:
+        return
+    if getattr(snapshot, "_ready", False):
+        return
+    hook = getattr(instance, "__snapclass_ready__", None)
+    expected_path = snapshot.path if hook is not None else None
+    snapshot._ready = True
+    try:
+        _call_snapshot_lifecycle_hook(
+            instance,
+            "__snapclass_ready__",
+            snapshot=snapshot,
+            path=expected_path,
+        )
+        _ensure_snapshot_path_unchanged(
+            snapshot,
+            expected_path,
+            "__snapclass_ready__",
+        )
+    except Exception:
+        snapshot._ready = False
+        raise
+
+
+def _mark_snapshot_loaded(instance: object, path: Path) -> None:
+    """Run ``__snapclass_loaded__`` after file data is applied and tracked."""
+    snapshot = getattr(instance, "snapshot", None)
+    if snapshot is None:
+        return
+    hook = getattr(instance, "__snapclass_loaded__", None)
+    expected_path = snapshot.path if hook is not None else None
+    _call_snapshot_lifecycle_hook(
+        instance,
+        "__snapclass_loaded__",
+        snapshot=snapshot,
+        path=path,
+    )
+    _ensure_snapshot_path_unchanged(
+        snapshot,
+        expected_path,
+        "__snapclass_loaded__",
+    )
+
+
+def _call_snapshot_lifecycle_hook(
+    instance: object,
+    hook_name: str,
+    *,
+    snapshot: "Snapshot",
+    path: Path | None = None,
+) -> None:
+    """Invoke a snapclass lifecycle hook with suppressed autosave/reload hooks."""
+    hook = getattr(instance, hook_name, None)
+    if hook is None:
+        return
+    try:
+        with _snapclass_hook_context(instance):
+            if hook_name == "__snapclass_loaded__":
+                hook(snapshot=snapshot, path=path)
+            else:
+                hook(snapshot=snapshot)
+    except Exception as exc:
+        location = f" at {path}" if path is not None else ""
+        raise SnapclassError(
+            f"Failed to run {hook_name} for {instance.__class__.__name__}"
+            f"{location}: {exc}"
+        ) from exc
+
+
+@contextmanager
+def _snapclass_hook_context(instance: object) -> Iterator[None]:
+    """Suppress automatic saves and reloads for one instance during lifecycle hooks."""
+    previous_loading = getattr(instance, "_snapclass_loading", False)
+    previous_suppressed = getattr(instance, "_snapclass_hooks_suppressed", False)
+    object.__setattr__(instance, "_snapclass_loading", True)
+    object.__setattr__(instance, "_snapclass_hooks_suppressed", True)
+    try:
+        yield
+    finally:
+        object.__setattr__(instance, "_snapclass_hooks_suppressed", previous_suppressed)
+        object.__setattr__(instance, "_snapclass_loading", previous_loading)
+
+
+def _ensure_snapshot_path_unchanged(
+    snapshot: "Snapshot",
+    expected_path: Path | None,
+    hook_name: str,
+) -> None:
+    """Raise when a lifecycle hook retargets the snapshot path."""
+    if expected_path is None:
+        return
+    try:
+        current_path = snapshot._require_path()
+    except Exception as exc:
+        raise SnapclassError(
+            f"{hook_name} left snapshot path unresolved after lifecycle hook; "
+            "normalize snapshot path fields before loading or creating "
+            f"snapshots: {exc}"
+        ) from exc
+    if current_path == expected_path:
+        return
+    raise SnapclassError(
+        f"{hook_name} changed snapshot path from {expected_path} to "
+        f"{current_path}; normalize snapshot path fields before loading or "
+        "creating snapshots"
+    )
+
+
 def _install(cls: type, config: Config) -> None:
     cls.__snapclass_config__ = config
     cls.snapshots = CollectionDescriptor()
@@ -449,11 +561,16 @@ def _install(cls: type, config: Config) -> None:
         _apply_sidecar_values(self, pending_sidecars, save_metadata=False)
         _apply_sidecar_values(self, sidecar_values, save_metadata=False)
         object.__setattr__(self, "_snapclass_initializing", False)
-        if _auto_enabled(config):
-            if self.snapshot.exists:
-                self.snapshot.load(_initial=True)
-            else:
-                self.snapshot.save()
+        automatic = _auto_enabled(config, self)
+        if automatic and self.snapshot.exists:
+            self.snapshot.load(_initial=True)
+        else:
+            _mark_snapshot_ready(self)
+            if automatic:
+                if self.snapshot.exists:
+                    self.snapshot.load()
+                else:
+                    self.snapshot.save()
 
     cls.__init__ = __init__
 
@@ -469,6 +586,11 @@ def _install(cls: type, config: Config) -> None:
                 pending[name] = value
                 object.__setattr__(self, _PENDING_SIDECARS_ATTR, pending)
                 return
+            if getattr(self, "_snapclass_hooks_suppressed", False):
+                raise SnapclassError(
+                    f"Cannot assign sidecar {name!r} during snapclass lifecycle "
+                    "hooks; write sidecars after the hook has returned"
+                )
             sidecar_descriptor.snapshot(self).write(value)
             return
         snapshot = getattr(self, "snapshot", None)
@@ -480,7 +602,7 @@ def _install(cls: type, config: Config) -> None:
         )
         if (
             should_track
-            and _auto_enabled(snapshot._config)
+            and _auto_enabled(snapshot._config, self)
             and not getattr(self, "_snapclass_loading", False)
             and snapshot.exists
             and snapshot.modified
@@ -513,7 +635,7 @@ def _install(cls: type, config: Config) -> None:
                     if inferred_hint is not None:
                         inferred_hints[name] = inferred_hint
                 object.__setattr__(self, _INFERRED_HINTS_ATTR, inferred_hints)
-            if _auto_enabled(snapshot._config):
+            if _auto_enabled(snapshot._config, self):
                 snapshot.save()
                 snapshot.load()
 
@@ -531,7 +653,7 @@ def _install(cls: type, config: Config) -> None:
         if (
             name in field_names
             and snapshot is not None
-            and _auto_enabled(config)
+            and _auto_enabled(config, self)
             and not object.__getattribute__(self, "__dict__").get("_snapclass_initializing", False)
             and not object.__getattribute__(self, "__dict__").get("_snapclass_loading", False)
             and snapshot.exists
@@ -605,6 +727,7 @@ class Snapshot:
         self._last_mtime: float | None = None
         self._loaded_data: dict[str, Any] | None = None
         self._loaded_path: Path | None = None
+        self._ready = False
 
     @property
     def classname(self) -> str:
@@ -794,6 +917,8 @@ class Snapshot:
             self._loaded_path = current_path
             self._last_text = text
             self.modified = False
+            _mark_snapshot_ready(self._instance)
+            _mark_snapshot_loaded(self._instance, current_path)
         finally:
             object.__setattr__(self._instance, "_snapclass_loading", False)
 
@@ -834,7 +959,7 @@ class TrackedList(list):
         super().__init__(_track_value(value, snapshot) for value in values)
 
     def _save(self) -> None:
-        if _auto_enabled(self._snapshot._config):
+        if _auto_enabled(self._snapshot._config, self._snapshot._instance):
             self._snapshot.save()
             _coerce_tracked_container_in_place(self, self._snapshot)
 
@@ -895,7 +1020,7 @@ class TrackedDeque(deque):
         super().__init__(_track_value(value, snapshot) for value in values)
 
     def _save(self) -> None:
-        if _auto_enabled(self._snapshot._config):
+        if _auto_enabled(self._snapshot._config, self._snapshot._instance):
             self._snapshot.save()
             _coerce_tracked_container_in_place(self, self._snapshot)
 
@@ -965,7 +1090,7 @@ class TrackedCounter(Counter):
         Counter.update(self, values)
 
     def _save(self) -> None:
-        if _auto_enabled(self._snapshot._config):
+        if _auto_enabled(self._snapshot._config, self._snapshot._instance):
             self._snapshot.save()
             _coerce_tracked_container_in_place(self, self._snapshot)
 
@@ -1030,7 +1155,7 @@ class TrackedDict(dict):
             raise AttributeError(name) from exc
 
     def _save(self) -> None:
-        if _auto_enabled(self._snapshot._config):
+        if _auto_enabled(self._snapshot._config, self._snapshot._instance):
             self._snapshot.save()
             _coerce_tracked_container_in_place(self, self._snapshot)
 
@@ -1116,7 +1241,7 @@ class TrackedDefaultDict(defaultdict):
             raise AttributeError(name) from exc
 
     def _save(self) -> None:
-        if _auto_enabled(self._snapshot._config):
+        if _auto_enabled(self._snapshot._config, self._snapshot._instance):
             self._snapshot.save()
             _coerce_tracked_container_in_place(self, self._snapshot)
 
@@ -2584,8 +2709,12 @@ def _replace_path_atomic(temp_path: Path, path: Path) -> None:
             time.sleep(0.01 * (attempt + 1))
 
 
-def _auto_enabled(config: Config) -> bool:
-    return sessions.HOOKS_ENABLED and not config.manual
+def _auto_enabled(config: Config, instance: object | None = None) -> bool:
+    if not sessions.HOOKS_ENABLED or config.manual:
+        return False
+    if instance is not None and getattr(instance, "_snapclass_hooks_suppressed", False):
+        return False
+    return True
 
 
 def _lookup(item: object, key: str) -> Any:

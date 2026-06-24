@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 from dataclasses import FrozenInstanceError, field, is_dataclass
+from pathlib import Path
 from typing import IO
 
 import pytest
@@ -87,6 +88,42 @@ def test_snapclass_without_pattern_accepts_dataclass_kwargs():
 
 def test_package_declares_pep561_typing_marker():
     assert (importlib.resources.files("snapclass") / "py.typed").is_file()
+
+
+def test_package_includes_snapclass_fluency_skill():
+    skill = (
+        importlib.resources.files("snapclass")
+        / "skills"
+        / "snapclass-fluency"
+        / "SKILL.md"
+    )
+
+    assert skill.is_file()
+    text = skill.read_text(encoding="utf-8")
+    assert "name: snapclass-fluency" in text
+    assert "# Snapclass Fluency" in text
+
+
+def test_packaged_snapclass_fluency_skill_matches_repo_copy():
+    repo_skill = (
+        Path(__file__).resolve().parents[1]
+        / "skills"
+        / "snapclass-fluency"
+        / "SKILL.md"
+    )
+    if not repo_skill.is_file():
+        pytest.skip("repository skill copy is not included here")
+
+    packaged_skill = (
+        importlib.resources.files("snapclass")
+        / "skills"
+        / "snapclass-fluency"
+        / "SKILL.md"
+    )
+
+    assert packaged_skill.read_text(encoding="utf-8") == repo_skill.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_plugins_export_mypy_entrypoint():

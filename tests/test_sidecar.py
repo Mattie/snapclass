@@ -145,6 +145,30 @@ def test_loaded_hook_sidecar_assignment_persists_on_explicit_save(tmp_path):
     assert reloaded.body == "Hook body\n"
 
 
+def test_ready_hook_sidecar_pointer_retargets_snapshot_save_path(tmp_path):
+    @snapclass("{self.content_file}.yml", stash=Stash(tmp_path), manual=True)
+    class Article:
+        name: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.name}.md")
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and sidecar pointers can retarget first save."""
+            self.body = "Ready body\n"
+
+    article = Article("dusk")
+
+    article.snapshot.save()
+
+    metadata = tmp_path / "dusk.md.yml"
+    body = tmp_path / "dusk.md"
+
+    assert article.content_file == "dusk.md"
+    assert article.snapshot.path == metadata
+    assert body.read_text(encoding="utf-8") == "Ready body\n"
+    assert metadata.read_text(encoding="utf-8") == "name: dusk\n"
+
+
 def test_text_sidecar_can_use_explicit_stash(tmp_path):
     app = Stash(tmp_path / "world")
     articles = app / "article"

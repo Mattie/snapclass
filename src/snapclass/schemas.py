@@ -530,12 +530,16 @@ def _install(cls: type, config: Config) -> None:
         _apply_sidecar_values(self, pending_sidecars, save_metadata=False)
         _apply_sidecar_values(self, sidecar_values, save_metadata=False)
         object.__setattr__(self, "_snapclass_initializing", False)
-        if _auto_enabled(config, self) and self.snapshot.exists:
+        automatic = _auto_enabled(config, self)
+        if automatic and self.snapshot.exists:
             self.snapshot.load(_initial=True)
         else:
             _mark_snapshot_ready(self)
-            if _auto_enabled(config, self):
-                self.snapshot.save()
+            if automatic:
+                if self.snapshot.exists:
+                    self.snapshot.load()
+                else:
+                    self.snapshot.save()
 
     cls.__init__ = __init__
 
@@ -832,6 +836,7 @@ class Snapshot:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         if path is not None:
             self.path = path
+        sidecar.prepare_overrides(self._instance)
         current_path = self._require_path()
         with _write_lock_for(current_path):
             self._check_write_conflict(current_path)

@@ -146,10 +146,29 @@ class SidecarDescriptor:
             return _MISSING
         return getattr(instance, _OVERRIDES_ATTR, {}).get(name, _MISSING)
 
+    def _prepare_pointer(self, instance: object) -> None:
+        """Apply the pointer-field update that a later sidecar write would make."""
+        if not self.field:
+            return
+        relative = self.snapshot(instance).relative_path
+        object.__setattr__(instance, self.field, relative.as_posix())
+
 
 def clear_overrides(instance: object) -> None:
     """Clear all suppressed sidecar assignments for an instance."""
     object.__setattr__(instance, _OVERRIDES_ATTR, {})
+
+
+def prepare_overrides(instance: object) -> None:
+    """Apply sidecar pointer fields before resolving the enclosing snapshot path."""
+    overrides = dict(getattr(instance, _OVERRIDES_ATTR, {}))
+    if not overrides:
+        return
+    descriptors = _override_descriptors(instance)
+    for name in overrides:
+        descriptor = descriptors.get(name)
+        if descriptor is not None:
+            descriptor._prepare_pointer(instance)
 
 
 def flush_overrides(instance: object) -> None:
@@ -157,15 +176,20 @@ def flush_overrides(instance: object) -> None:
     overrides = dict(getattr(instance, _OVERRIDES_ATTR, {}))
     if not overrides:
         return
-    descriptors = {
-        getattr(descriptor, "_name", None): descriptor
-        for descriptor in _descriptors_for(type(instance))
-    }
+    descriptors = _override_descriptors(instance)
     for name, value in overrides.items():
         descriptor = descriptors.get(name)
         if descriptor is not None:
             descriptor.snapshot(instance).write(value, save_metadata=False)
             descriptor._clear_override(instance)
+
+
+def _override_descriptors(instance: object) -> dict[str | None, SidecarDescriptor]:
+    """Return sidecar descriptors keyed by their owning model attribute name."""
+    return {
+        getattr(descriptor, "_name", None): descriptor
+        for descriptor in _descriptors_for(type(instance))
+    }
 
 
 class SidecarText(str):

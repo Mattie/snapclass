@@ -272,6 +272,31 @@ def test_ready_hook_does_not_mask_file_data_during_initial_load(tmp_path):
     assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
 
 
+def test_ready_hook_path_change_loads_existing_snapshot_before_create(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item:
+        name: str
+        value: str = ""
+        ready_seen: str = field(init=False)
+
+        def __snapclass_ready__(self, *, snapshot):
+            """Snapshot is attached and may normalize path fields before create."""
+            self.name = self.name.removeprefix("draft-")
+            self.ready_seen = self.value
+            if not self.value:
+                self.value = "ready"
+
+    (tmp_path / "sample.yml").write_text("value: file\n", encoding="utf-8")
+
+    item = Item("draft-sample")
+
+    assert item.name == "sample"
+    assert item.ready_seen == ""
+    assert item.value == "file"
+    assert (tmp_path / "sample.yml").read_text(encoding="utf-8") == "value: file\n"
+    assert not (tmp_path / "draft-sample.yml").exists()
+
+
 def test_ready_hook_runs_once_but_loaded_runs_on_each_load(tmp_path):
     calls: list[str] = []
 

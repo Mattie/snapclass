@@ -444,6 +444,7 @@ def _mark_snapshot_ready(instance: object) -> None:
             instance,
             "__snapclass_ready__",
             snapshot=snapshot,
+            path=expected_path,
         )
         _ensure_snapshot_path_unchanged(
             snapshot,

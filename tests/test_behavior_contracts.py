@@ -396,6 +396,7 @@ def test_lifecycle_hook_failures_include_hook_name_and_path(tmp_path):
 
     ready_message = str(ready_error.value)
     assert "__snapclass_ready__" in ready_message
+    assert "ready.yml" in ready_message
     assert "ReadyItem" in ready_message
     assert "ready failed" in ready_message
 

@@ -156,7 +156,7 @@ def test_model_meta_snapshot_require_lock_guards_save(tmp_path):
 
     prompt = Prompt("popsicle", "hello")
 
-    with pytest.raises(SnapclassError, match="snapshot\\.locked\\(reload=True\\)"):
+    with pytest.raises(SnapclassError, match="active snapshot lock"):
         prompt.snapshot.save()
 
     with prompt.snapshot.locked():
@@ -165,6 +165,15 @@ def test_model_meta_snapshot_require_lock_guards_save(tmp_path):
     assert (tmp_path / "prompts" / "popsicle.yml").read_text(encoding="utf-8") == (
         "body: hello\n"
     )
+
+
+def test_model_meta_snapshot_require_lock_requires_pattern():
+    with pytest.raises(ValueError, match="persisted snapshot pattern"):
+        class Prompt(Model):
+            name: str
+
+            class Meta:
+                snapshot_require_lock = True
 
 
 def test_patternless_model_infers_fields_and_exposes_projection_without_path():
@@ -373,13 +382,22 @@ def test_create_model_accepts_require_lock(tmp_path):
     )
     prompt = Prompt("popsicle", "hello")
 
-    with pytest.raises(SnapclassError, match="snapshot\\.locked\\(reload=True\\)"):
+    with pytest.raises(SnapclassError, match="active snapshot lock"):
         prompt.snapshot.save()
 
     with prompt.snapshot.locked():
         prompt.snapshot.save()
 
     assert (tmp_path / "popsicle.yml").read_text(encoding="utf-8") == "body: hello\n"
+
+
+def test_create_model_rejects_require_lock_without_pattern():
+    @dataclass
+    class Prompt:
+        name: str
+
+    with pytest.raises(ValueError, match="persisted snapshot pattern"):
+        create_model(Prompt, require_lock=True)
 
 
 def test_create_model_rejects_non_dataclass():

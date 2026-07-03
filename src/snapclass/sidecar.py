@@ -229,8 +229,19 @@ class SidecarSnapshot:
         save_metadata: bool = True,
     ) -> None:
         snapshot = getattr(self._instance, "snapshot", None)
-        if save_metadata and self._field and snapshot is not None:
-            snapshot._check_write_conflict(snapshot._require_path())
+        metadata_path: Path | None = None
+        if save_metadata and snapshot is not None:
+            if (
+                self._field
+                or getattr(snapshot, "require_lock", False)
+                or getattr(snapshot, "_lock_depth", 0)
+            ):
+                metadata_path = snapshot._require_path()
+                snapshot._check_required_lock(metadata_path)
+            if self._field:
+                if metadata_path is None:
+                    metadata_path = snapshot._require_path()
+                snapshot._check_write_conflict(metadata_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self._descriptor.kind == "text":
             if not isinstance(value, str):

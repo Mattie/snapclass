@@ -69,7 +69,7 @@ def test_require_lock_blocks_save_outside_locked_context(tmp_path):
     state = WorkflowState("run")
     state.steps.append("started")
 
-    with pytest.raises(SnapclassError, match="snapshot\\.locked\\(reload=True\\)"):
+    with pytest.raises(SnapclassError, match="active snapshot lock"):
         state.snapshot.save()
 
     with state.snapshot.locked(reload=True):
@@ -84,6 +84,13 @@ def test_require_lock_rejects_automatic_models(tmp_path):
     with pytest.raises(ValueError, match="manual=True"):
 
         @snapclass("{self.name}.yml", stash=Stash(tmp_path), require_lock=True)
+        class WorkflowState:
+            name: str
+
+
+def test_require_lock_rejects_patternless_snapclass():
+    with pytest.raises(ValueError, match="persisted snapshot pattern"):
+        @snapclass(require_lock=True)
         class WorkflowState:
             name: str
 

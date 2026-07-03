@@ -109,12 +109,12 @@ def snapclass(
 ):
     if pattern is None:
         if require_lock:
-            raise ValueError("require_lock=True requires a persisted manual snapclass")
+            raise ValueError("require_lock=True requires a persisted snapshot pattern")
         return dataclasses.dataclass(**dataclass_kwargs)
 
     if callable(pattern):
         if require_lock:
-            raise ValueError("require_lock=True requires a persisted manual snapclass")
+            raise ValueError("require_lock=True requires a persisted snapshot pattern")
         return dataclasses.dataclass(pattern)
 
     def decorate(cls: type):
@@ -122,7 +122,7 @@ def snapclass(
             cls = _dataclass_with_sidecars(cls, **dataclass_kwargs)
         unknown_policy = _normalize_unknown_policy(unknown, extras_field)
         conflict_policy = _normalize_conflict_policy(conflict)
-        _validate_require_lock(manual, require_lock)
+        _validate_require_lock(pattern, manual, require_lock)
         _validate_extras_field(cls, unknown_policy, extras_field)
         config = Config(
             pattern=pattern,
@@ -261,7 +261,7 @@ def _install_model_config(
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
     resolved_manual = True if pattern is None else manual
-    _validate_require_lock(resolved_manual, require_lock)
+    _validate_require_lock(pattern, resolved_manual, require_lock)
     _validate_extras_field(cls, unknown_policy, extras_field)
     config = Config(
         pattern=pattern,
@@ -353,7 +353,7 @@ def sync(
     cls = instance.__class__
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
-    _validate_require_lock(manual, require_lock)
+    _validate_require_lock(pattern, manual, require_lock)
     _validate_extras_field(cls, unknown_policy, extras_field)
     config = Config(
         pattern=pattern,
@@ -995,8 +995,9 @@ class Snapshot:
             )
         if self.require_lock and self._lock_depth == 0:
             raise SnapclassError(
-                "snapshot.save() requires an active snapshot lock; wrap mutation "
-                "and save in `with obj.snapshot.locked(reload=True):`"
+                "Snapshot writes require an active snapshot lock; wrap mutation "
+                "and save in `with obj.snapshot.locked():`; use reload=True when "
+                "coordinating shared writers"
             )
 
     def _check_write_conflict(self, path: Path) -> None:
@@ -1910,7 +1911,13 @@ def _normalize_conflict_policy(conflict: str) -> str:
     return conflict
 
 
-def _validate_require_lock(manual: bool, require_lock: bool) -> None:
+def _validate_require_lock(
+    pattern: str | None,
+    manual: bool,
+    require_lock: bool,
+) -> None:
+    if require_lock and pattern is None:
+        raise ValueError("require_lock=True requires a persisted snapshot pattern")
     if require_lock and not manual:
         raise ValueError("require_lock=True requires manual=True")
 

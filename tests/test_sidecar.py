@@ -247,6 +247,38 @@ def test_sidecar_write_checks_metadata_conflict_before_content_write(tmp_path):
     assert "Human edit" in metadata.read_text(encoding="utf-8")
 
 
+def test_require_lock_blocks_pointer_sidecar_write_before_content_write(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+
+    @snapclass(
+        "{self.slug}/article.yml",
+        stash=articles,
+        manual=True,
+        require_lock=True,
+    )
+    class Article:
+        slug: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+
+    article = Article("dusk-court")
+    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+
+    with pytest.raises(SnapclassError, match="active snapshot lock"):
+        article.body = "# Outside lock\n"
+
+    assert article.content_file == ""
+    assert not body.exists()
+
+    with article.snapshot.locked():
+        article.body = "# Inside lock\n"
+
+    assert article.content_file == "dusk-court.md"
+    assert "content_file: dusk-court.md" in metadata.read_text(encoding="utf-8")
+    assert body.read_text(encoding="utf-8") == "# Inside lock\n"
+
+
 def test_text_sidecar_pointer_stays_relative_after_metadata_move(tmp_path):
     articles = Stash(tmp_path / "world") / "article"
 

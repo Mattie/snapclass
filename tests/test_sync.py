@@ -214,7 +214,7 @@ def test_sync_accepts_require_lock_for_workflow_snapshots(tmp_path):
         require_lock=True,
     )
 
-    with pytest.raises(SnapclassError, match="snapshot\\.locked\\(reload=True\\)"):
+    with pytest.raises(SnapclassError, match="active snapshot lock"):
         workflow.snapshot.save()
 
     with workflow.snapshot.locked():

@@ -80,6 +80,48 @@ article = Article(
 loaded = Article.snapshots.get("dusk-court")
 ```
 
+## Coordinating Shared Files
+
+When two local processes may update the same file, wrap the short
+read-modify-save section in `snapshot.locked(reload=True)`. The lock is
+cooperative and local to the machine, using a `.lock` file beside the snapshot.
+
+```python
+from snapclass import snapclass, Stash, Fresh
+
+
+@snapclass("{self.name}.yml", stash=Stash("./runs"), manual=True, require_lock=True)
+class WorkflowState:
+    name: str
+    steps: list[str] = Fresh.List
+
+
+state = WorkflowState("daily-run")
+
+with state.snapshot.locked(reload=True):
+    state.steps.append("started")
+    state.save()
+```
+
+For async workflows, keep the locked block short. Do the slow work after the
+save has released the file lock:
+
+```python
+with state.snapshot.locked(reload=True):
+    state.steps.append("started")
+    state.save()
+
+await do_work()
+
+with state.snapshot.locked(reload=True):
+    state.steps.append("finished")
+    state.save()
+```
+
+`require_lock=True` is optional, but useful for manual models where every save
+should go through this pattern. It makes `state.save()` raise unless it is
+called inside `state.snapshot.locked(...)`.
+
 ## FAQ
 
 ### Why use `snapclass` over `datafiles`?

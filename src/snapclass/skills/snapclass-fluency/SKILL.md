@@ -406,6 +406,54 @@ note.save()
 note.load()
 ```
 
+Use `snapshot.locked(reload=True)` when multiple local processes or workers may
+write the same snapshot file. The intended pattern is short, explicit, and
+file-centered:
+
+```python
+from snapclass import snapclass, Stash, Fresh
+
+
+@snapclass("{self.name}.yml", stash=Stash("./runs"), manual=True, require_lock=True)
+class WorkflowState:
+    name: str
+    steps: list[str] = Fresh.List
+
+
+state = WorkflowState("daily-run")
+
+with state.snapshot.locked(reload=True):
+    state.steps.append("started")
+    state.save()
+```
+
+`locked(reload=True)` acquires a cooperative per-file OS lock, reloads the
+latest file contents while the lock is held, lets the caller mutate the object,
+and expects an explicit save before leaving the block. Use `require_lock=True`
+for shared persisted models where saving outside `snapshot.locked(...)` should
+be an error. `require_lock=True` belongs with `manual=True`.
+
+In async workflows, still use the synchronous context manager and keep the block
+tiny. Do the slow awaitable work after releasing the lock:
+
+```python
+with state.snapshot.locked(reload=True):
+    state.steps.append("started")
+    state.save()
+
+await do_work()
+
+with state.snapshot.locked(reload=True):
+    state.steps.append("finished")
+    state.save()
+```
+
+The lock is local-machine, cross-process coordination for cooperative snapclass
+writers. It is a good fit for two Python backends sharing the same ordinary local
+file. Raw writers that ignore the `.lock` side file can still race, and
+network/cloud-synced filesystems, containers, mounted volumes, and mixed
+WSL/Windows access need explicit validation before relying on the lock.
+
 `snapshot.data` is the serialized mapping before file formatting. `snapshot.text` is the formatted file text for the current pattern or formatter. Setting `snapshot.text` writes the file directly, reloads the object, and still honors conflict policy.
 
 Patternless `Model` or `create_model(...)` objects can use `.snapshot.data` and `.snapshot.text` as projections, but saving requires a pattern.
@@ -962,6 +1010,7 @@ class Prompt(Model):
         snapshot_pattern = "{self.name}.yml"
         snapshot_stash = Stash("./prompts")
         snapshot_manual = True
+        snapshot_require_lock = False
         snapshot_defaults = False
         snapshot_infer = False
         snapshot_fields = None

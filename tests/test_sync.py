@@ -200,6 +200,31 @@ def test_sync_accepts_conflict_policy_for_workflow_snapshots(tmp_path):
         workflow.snapshot.save()
 
 
+def test_sync_accepts_require_lock_for_workflow_snapshots(tmp_path):
+    @dataclass
+    class Workflow:
+        id: str
+        status: str = "created"
+
+    workflow = Workflow("wf-lock", "running")
+    sync(
+        workflow,
+        str(tmp_path / "{self.id}.yml"),
+        manual=True,
+        require_lock=True,
+    )
+
+    with pytest.raises(SnapclassError, match="snapshot\\.locked\\(reload=True\\)"):
+        workflow.snapshot.save()
+
+    with workflow.snapshot.locked():
+        workflow.snapshot.save()
+
+    assert (tmp_path / "wf-lock.yml").read_text(encoding="utf-8") == (
+        "status: running\n"
+    )
+
+
 def test_sync_snapshot_saves_are_serialized_across_threads(tmp_path):
     @dataclass
     class Step:

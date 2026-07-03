@@ -9,7 +9,6 @@ import os
 import re
 import sys
 import tempfile
-import threading
 import time
 import types
 import warnings
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Union, get_args, get_origin, get_type_hints, is_typeddict
 
 from . import formatters, serializers, sessions, sidecar
+from ._locks import locked_path as _locked_path, write_lock_for as _shared_write_lock_for
 from .collections import Collection, CollectionDescriptor
 from .paths import safe_path_placeholder
 from .formatters import FileFormatter
@@ -32,8 +32,6 @@ _INFERRED_FIELDS_ATTR = "__snapclass_inferred_fields__"
 _INFERRED_HINTS_ATTR = "__snapclass_inferred_hints__"
 _DEFAULT_CACHE_ATTR = "__snapclass_default_cache__"
 _PENDING_SIDECARS_ATTR = "__snapclass_pending_sidecars__"
-_WRITE_LOCKS: dict[Path, threading.RLock] = {}
-_WRITE_LOCKS_GUARD = threading.Lock()
 
 
 class SnapclassError(Exception):
@@ -68,6 +66,7 @@ class Config:
     extras_field: str | None = None
     migrate: Callable[..., Mapping[str, Any] | None] | None = None
     conflict: str = "overwrite"
+    require_lock: bool = False
     type_hints: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -86,6 +85,7 @@ class Meta:
     snapshot_extras_field: str | None = None
     snapshot_migrate: Callable[..., Mapping[str, Any] | None] | None = None
     snapshot_conflict: str = "overwrite"
+    snapshot_require_lock: bool = False
 
 
 def snapclass(
@@ -104,12 +104,17 @@ def snapclass(
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
     conflict: str = "overwrite",
+    require_lock: bool = False,
     **dataclass_kwargs: Any,
 ):
     if pattern is None:
+        if require_lock:
+            raise ValueError("require_lock=True requires a persisted manual snapclass")
         return dataclasses.dataclass(**dataclass_kwargs)
 
     if callable(pattern):
+        if require_lock:
+            raise ValueError("require_lock=True requires a persisted manual snapclass")
         return dataclasses.dataclass(pattern)
 
     def decorate(cls: type):
@@ -117,6 +122,7 @@ def snapclass(
             cls = _dataclass_with_sidecars(cls, **dataclass_kwargs)
         unknown_policy = _normalize_unknown_policy(unknown, extras_field)
         conflict_policy = _normalize_conflict_policy(conflict)
+        _validate_require_lock(manual, require_lock)
         _validate_extras_field(cls, unknown_policy, extras_field)
         config = Config(
             pattern=pattern,
@@ -133,6 +139,7 @@ def snapclass(
             extras_field=extras_field,
             migrate=migrate,
             conflict=conflict_policy,
+            require_lock=require_lock,
         )
         config.type_hints = _resolve_type_hints(cls)
         _install(cls, config)
@@ -153,6 +160,7 @@ def create_model(
     write_delay: float | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
     conflict: str | None = None,
+    require_lock: bool | None = None,
 ) -> type:
     if not dataclasses.is_dataclass(cls):
         raise ValueError(f"{cls} must be a dataclass")
@@ -193,6 +201,9 @@ def create_model(
     resolved_conflict = conflict if conflict is not None else (
         getattr(meta, "snapshot_conflict", "overwrite") if meta is not None else "overwrite"
     )
+    resolved_require_lock = require_lock if require_lock is not None else (
+        getattr(meta, "snapshot_require_lock", False) if meta is not None else False
+    )
     _install_model_config(
         cls,
         pattern=resolved_pattern,
@@ -208,6 +219,7 @@ def create_model(
         extras_field=extras_field,
         migrate=resolved_migrate,
         conflict=resolved_conflict,
+        require_lock=resolved_require_lock,
     )
     cls.Meta = Meta(
         snapshot_fields=resolved_fields,
@@ -223,6 +235,7 @@ def create_model(
         snapshot_extras_field=extras_field,
         snapshot_migrate=resolved_migrate,
         snapshot_conflict=_normalize_conflict_policy(resolved_conflict),
+        snapshot_require_lock=resolved_require_lock,
     )
     return cls
 
@@ -243,15 +256,18 @@ def _install_model_config(
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
     conflict: str = "overwrite",
+    require_lock: bool = False,
 ) -> None:
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
+    resolved_manual = True if pattern is None else manual
+    _validate_require_lock(resolved_manual, require_lock)
     _validate_extras_field(cls, unknown_policy, extras_field)
     config = Config(
         pattern=pattern,
         stash=stash,
         module_dir=_module_dir_for(cls),
-        manual=True if pattern is None else manual,
+        manual=resolved_manual,
         defaults=defaults,
         infer=infer,
         fields=fields,
@@ -262,6 +278,7 @@ def _install_model_config(
         extras_field=extras_field,
         migrate=migrate,
         conflict=conflict_policy,
+        require_lock=require_lock,
     )
     config.type_hints = _resolve_type_hints(cls)
     _install(cls, config)
@@ -311,6 +328,7 @@ class Model:
             extras_field=getattr(meta, "snapshot_extras_field", None),
             migrate=getattr(meta, "snapshot_migrate", None),
             conflict=getattr(meta, "snapshot_conflict", "overwrite"),
+            require_lock=getattr(meta, "snapshot_require_lock", False),
         )
 
 
@@ -330,10 +348,12 @@ def sync(
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
     conflict: str = "overwrite",
+    require_lock: bool = False,
 ) -> object:
     cls = instance.__class__
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
+    _validate_require_lock(manual, require_lock)
     _validate_extras_field(cls, unknown_policy, extras_field)
     config = Config(
         pattern=pattern,
@@ -350,6 +370,7 @@ def sync(
         extras_field=extras_field,
         migrate=migrate,
         conflict=conflict_policy,
+        require_lock=require_lock,
     )
     config.type_hints = _safe_type_hints(cls)
     if not hasattr(cls, "__snapclass_config__"):
@@ -704,6 +725,7 @@ class Snapshot:
         infer: bool | None = None,
         minimal_diffs: bool | None = None,
         write_delay: float | None = None,
+        require_lock: bool | None = None,
         root: "Snapshot | None" = None,
     ) -> None:
         self._instance = instance
@@ -717,6 +739,7 @@ class Snapshot:
                 fields=fields or {},
                 minimal_diffs=minimal_diffs,
                 write_delay=write_delay,
+                require_lock=False if require_lock is None else require_lock,
             )
             config.type_hints = _safe_type_hints(instance.__class__)
         self._config = config
@@ -728,6 +751,8 @@ class Snapshot:
         self._loaded_data: dict[str, Any] | None = None
         self._loaded_path: Path | None = None
         self._ready = False
+        self._lock_depth = 0
+        self._locked_path: Path | None = None
 
     @property
     def classname(self) -> str:
@@ -822,6 +847,12 @@ class Snapshot:
         return self._config.infer
 
     @property
+    def require_lock(self) -> bool:
+        if self._root is not None:
+            return self._root.require_lock
+        return self._config.require_lock
+
+    @property
     def stash(self) -> Stash | None:
         return self._stash or self._config.stash
 
@@ -851,6 +882,7 @@ class Snapshot:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         path = self._require_path()
         with _write_lock_for(path):
+            self._check_required_lock(path)
             self._check_write_conflict(path)
             _write_text_atomic(
                 path,
@@ -870,6 +902,7 @@ class Snapshot:
             self.path = path
         current_path = self._require_path()
         with _write_lock_for(current_path):
+            self._check_required_lock(current_path)
             self._check_write_conflict(current_path)
             sidecar.reconcile_before_save(self._instance, current_path)
             data = _to_data(
@@ -922,6 +955,27 @@ class Snapshot:
         finally:
             object.__setattr__(self._instance, "_snapclass_loading", False)
 
+    @contextmanager
+    def locked(self, *, reload: bool = False) -> Iterator["Snapshot"]:
+        __tracebackhide__ = sessions.HIDDEN_TRACEBACK
+        current_path = self._require_path()
+        if self._lock_depth and self._locked_path != current_path:
+            raise SnapclassError(
+                "Snapshot path changed while locked; keep path fields stable inside "
+                "snapshot.locked()"
+            )
+        with _locked_path(current_path):
+            previous_path = self._locked_path
+            self._locked_path = current_path
+            self._lock_depth += 1
+            try:
+                if reload and current_path.exists():
+                    self.load()
+                yield self
+            finally:
+                self._lock_depth -= 1
+                self._locked_path = previous_path if self._lock_depth else None
+
     def _require_path(self) -> Path:
         try:
             path = self.path
@@ -932,6 +986,18 @@ class Snapshot:
         if path is None:
             raise RuntimeError("'pattern' must be set")
         return path
+
+    def _check_required_lock(self, path: Path) -> None:
+        if self._locked_path is not None and path != self._locked_path:
+            raise SnapclassError(
+                "Snapshot path changed while locked; keep path fields stable inside "
+                "snapshot.locked()"
+            )
+        if self.require_lock and self._lock_depth == 0:
+            raise SnapclassError(
+                "snapshot.save() requires an active snapshot lock; wrap mutation "
+                "and save in `with obj.snapshot.locked(reload=True):`"
+            )
 
     def _check_write_conflict(self, path: Path) -> None:
         if self._config.conflict != "raise" or not path.exists():
@@ -1844,6 +1910,11 @@ def _normalize_conflict_policy(conflict: str) -> str:
     return conflict
 
 
+def _validate_require_lock(manual: bool, require_lock: bool) -> None:
+    if require_lock and not manual:
+        raise ValueError("require_lock=True requires manual=True")
+
+
 def _validate_extras_field(cls: type, unknown: str, extras_field: str | None) -> None:
     if unknown != "collect":
         return
@@ -2684,17 +2755,8 @@ def _write_text_atomic(path: Path, text: str, *, write_delay: float | None = Non
                 raise
 
 
-def _write_lock_for(path: Path) -> threading.RLock:
-    try:
-        key = path.resolve()
-    except FileNotFoundError:
-        key = path.absolute()
-    with _WRITE_LOCKS_GUARD:
-        lock = _WRITE_LOCKS.get(key)
-        if lock is None:
-            lock = threading.RLock()
-            _WRITE_LOCKS[key] = lock
-        return lock
+def _write_lock_for(path: Path) -> Any:
+    return _shared_write_lock_for(path)
 
 
 def _replace_path_atomic(temp_path: Path, path: Path) -> None:

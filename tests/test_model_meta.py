@@ -18,6 +18,7 @@ def test_model_exposes_default_meta_configuration():
     assert Model.Meta.snapshot_write_delay is None
     assert Model.Meta.snapshot_unknown == "ignore"
     assert Model.Meta.snapshot_conflict == "overwrite"
+    assert Model.Meta.snapshot_require_lock is False
 
 
 def test_model_meta_declaration_uses_snapclass_configuration(tmp_path):
@@ -140,6 +141,30 @@ def test_model_meta_snapshot_conflict_refuses_stale_save(tmp_path):
 
     with pytest.raises(SnapclassError, match="externally modified"):
         prompt.snapshot.save()
+
+
+def test_model_meta_snapshot_require_lock_guards_save(tmp_path):
+    class Prompt(Model):
+        name: str
+        body: str = ""
+
+        class Meta:
+            snapshot_pattern = "{self.name}.yml"
+            snapshot_stash = Stash(tmp_path / "prompts")
+            snapshot_manual = True
+            snapshot_require_lock = True
+
+    prompt = Prompt("popsicle", "hello")
+
+    with pytest.raises(SnapclassError, match="snapshot\\.locked\\(reload=True\\)"):
+        prompt.snapshot.save()
+
+    with prompt.snapshot.locked():
+        prompt.snapshot.save()
+
+    assert (tmp_path / "prompts" / "popsicle.yml").read_text(encoding="utf-8") == (
+        "body: hello\n"
+    )
 
 
 def test_patternless_model_infers_fields_and_exposes_projection_without_path():
@@ -332,6 +357,29 @@ def test_create_model_accepts_conflict_policy(tmp_path):
 
     with pytest.raises(SnapclassError, match="externally modified"):
         prompt.snapshot.save()
+
+
+def test_create_model_accepts_require_lock(tmp_path):
+    @dataclass
+    class Prompt:
+        name: str
+        body: str = ""
+
+    create_model(
+        Prompt,
+        pattern=str(tmp_path / "{self.name}.yml"),
+        manual=True,
+        require_lock=True,
+    )
+    prompt = Prompt("popsicle", "hello")
+
+    with pytest.raises(SnapclassError, match="snapshot\\.locked\\(reload=True\\)"):
+        prompt.snapshot.save()
+
+    with prompt.snapshot.locked():
+        prompt.snapshot.save()
+
+    assert (tmp_path / "popsicle.yml").read_text(encoding="utf-8") == "body: hello\n"
 
 
 def test_create_model_rejects_non_dataclass():

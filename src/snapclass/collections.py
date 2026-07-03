@@ -49,7 +49,12 @@ class Collection:
         instance = self._empty_instance(*args, **kwargs, include_defaults=True)
         _attach_snapshot(instance, self.model.__snapclass_config__, self._stash)
         initial_path = instance.snapshot._require_path()
-        with _write_lock_for(initial_path):
+        lock = (
+            instance.snapshot.locked()
+            if getattr(instance.snapshot, "require_lock", False)
+            else _write_lock_for(initial_path)
+        )
+        with lock:
             if instance.snapshot.exists:
                 instance.snapshot.load(_initial=True)
             else:

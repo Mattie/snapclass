@@ -10,6 +10,7 @@ import time
 import pytest
 
 from snapclass import SnapclassError, Stash, snapclass
+from snapclass._locks import _lock_path_for, _normalized_path, locked_path
 from snapclass.formatters import YAMLFormatter
 
 
@@ -18,6 +19,39 @@ def _subprocess_env() -> dict[str, str]:
     src = Path(__file__).resolve().parents[1] / "src"
     env["PYTHONPATH"] = os.fspath(src) + os.pathsep + env.get("PYTHONPATH", "")
     return env
+
+
+def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+
+def test_lock_normalizes_missing_paths_through_symlinked_parent(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    _symlink_or_skip(link, real, target_is_directory=True)
+
+    normalized = _normalized_path(link / "missing.yml")
+
+    assert normalized == (real / "missing.yml").resolve(strict=False)
+    assert _lock_path_for(normalized) == real / "missing.yml.lock"
+
+
+def test_locked_path_uses_normalized_path_for_lock_sidecar(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    target = real / "state.yml"
+    target.write_text("steps:\n  - created\n", encoding="utf-8")
+    link = tmp_path / "alias.yml"
+    _symlink_or_skip(link, target)
+
+    with locked_path(link):
+        assert (real / "state.yml.lock").exists()
+
+    assert not (tmp_path / "alias.yml.lock").exists()
 
 
 def test_snapshot_locked_reloads_before_mutation_and_saves_inside_block(tmp_path):

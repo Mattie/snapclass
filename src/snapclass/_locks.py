@@ -26,11 +26,12 @@ def write_lock_for(path: Path) -> threading.RLock:
 
 @contextmanager
 def locked_path(path: Path) -> Iterator[None]:
-    state = _lock_state_for(path)
+    normalized_path = _normalized_path(path)
+    state = _lock_state_for(normalized_path)
     state.lock.acquire()
     try:
         if state.depth == 0:
-            state.handle = _acquire_os_lock(path)
+            state.handle = _acquire_os_lock(normalized_path)
         state.depth += 1
         try:
             yield
@@ -56,10 +57,7 @@ def _lock_state_for(path: Path) -> _PathLockState:
 
 
 def _normalized_path(path: Path) -> Path:
-    try:
-        return path.resolve()
-    except FileNotFoundError:
-        return path.absolute()
+    return path.resolve(strict=False)
 
 
 def _lock_path_for(path: Path) -> Path:

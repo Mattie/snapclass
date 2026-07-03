@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import field
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -10,7 +11,12 @@ import time
 import pytest
 
 from snapclass import SnapclassError, Stash, snapclass
-from snapclass._locks import _lock_path_for, _normalized_path, locked_path
+from snapclass._locks import (
+    _is_windows_lock_contention,
+    _lock_path_for,
+    _normalized_path,
+    locked_path,
+)
 from snapclass.formatters import YAMLFormatter
 
 
@@ -40,18 +46,81 @@ def test_lock_normalizes_missing_paths_through_symlinked_parent(tmp_path):
     assert _lock_path_for(normalized) == real / "missing.yml.lock"
 
 
-def test_locked_path_uses_normalized_path_for_lock_sidecar(tmp_path):
+def test_locked_path_uses_normalized_parent_for_lock_sidecar(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    _symlink_or_skip(link, real, target_is_directory=True)
+
+    with locked_path(link / "state.yml"):
+        assert (real / "state.yml.lock").exists()
+
+    assert (link / "state.yml.lock").resolve() == (real / "state.yml.lock").resolve()
+
+
+def test_locked_path_keeps_leaf_symlink_aligned_with_atomic_replace(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
     target = real / "state.yml"
-    target.write_text("steps:\n  - created\n", encoding="utf-8")
-    link = tmp_path / "alias.yml"
-    _symlink_or_skip(link, target)
+    target.write_text("steps:\n  - target\n", encoding="utf-8")
+    alias = tmp_path / "alias.yml"
+    _symlink_or_skip(alias, target)
 
-    with locked_path(link):
-        assert (real / "state.yml.lock").exists()
+    normalized = _normalized_path(alias)
 
-    assert not (tmp_path / "alias.yml.lock").exists()
+    assert normalized == tmp_path / "alias.yml"
+    assert _lock_path_for(normalized) == tmp_path / "alias.yml.lock"
+    with locked_path(alias):
+        assert (tmp_path / "alias.yml.lock").exists()
+
+    assert not (real / "state.yml.lock").exists()
+
+
+def test_snapshot_save_keeps_leaf_symlink_lock_aligned_with_replaced_path(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    target = real / "state.yml"
+    target.write_text("steps:\n  - target\n", encoding="utf-8")
+    alias = tmp_path / "alias.yml"
+    _symlink_or_skip(alias, target)
+
+    @snapclass("alias.yml", stash=Stash(tmp_path), manual=True)
+    class State:
+        steps: list[str] = field(default_factory=list)
+
+    state = State.snapshots.get()
+    state.steps.append("alias")
+
+    with state.snapshot.locked():
+        state.snapshot.save()
+        assert (tmp_path / "alias.yml.lock").exists()
+        assert _lock_path_for(_normalized_path(alias)) == tmp_path / "alias.yml.lock"
+        assert not (real / "state.yml.lock").exists()
+
+    assert not alias.is_symlink()
+    assert YAMLFormatter.loads(alias.read_text(encoding="utf-8")) == {
+        "steps": ["target", "alias"],
+    }
+    assert YAMLFormatter.loads(target.read_text(encoding="utf-8")) == {
+        "steps": ["target"],
+    }
+
+
+def test_windows_lock_retry_classifier_only_accepts_lock_contention():
+    msvcrt_lock_contention = OSError(errno.EACCES, "permission denied")
+    lock_violation = OSError(errno.EACCES, "locked")
+    lock_violation.winerror = 33
+    sharing_violation = OSError(errno.EACCES, "sharing")
+    sharing_violation.winerror = 32
+    access_denied = OSError(errno.EACCES, "access denied")
+    access_denied.winerror = 5
+    bad_file_descriptor = OSError(errno.EBADF, "bad file descriptor")
+
+    assert _is_windows_lock_contention(msvcrt_lock_contention) is True
+    assert _is_windows_lock_contention(lock_violation) is True
+    assert _is_windows_lock_contention(sharing_violation) is True
+    assert _is_windows_lock_contention(access_denied) is False
+    assert _is_windows_lock_contention(bad_file_descriptor) is False
 
 
 def test_snapshot_locked_reloads_before_mutation_and_saves_inside_block(tmp_path):

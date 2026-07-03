@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import threading
 import time
@@ -57,7 +58,10 @@ def _lock_state_for(path: Path) -> _PathLockState:
 
 
 def _normalized_path(path: Path) -> Path:
-    return path.resolve(strict=False)
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    # Atomic replace writes to the final path itself, so resolve parent
+    # directories but keep the leaf name instead of following a leaf symlink.
+    return absolute.parent.resolve(strict=False) / absolute.name
 
 
 def _lock_path_for(path: Path) -> Path:
@@ -101,8 +105,18 @@ def _acquire_windows_lock(handle: BinaryIO) -> None:
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             return
-        except OSError:
+        except OSError as exc:
+            if not _is_windows_lock_contention(exc):
+                raise
             time.sleep(0.05)
+
+
+def _is_windows_lock_contention(exc: OSError) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in {32, 33}
+    # CPython's msvcrt.locking reports byte-range lock contention this way.
+    return exc.errno in {errno.EACCES, errno.EDEADLK}
 
 
 def _release_windows_lock(handle: BinaryIO) -> None:

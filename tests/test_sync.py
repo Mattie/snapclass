@@ -225,6 +225,15 @@ def test_sync_accepts_require_lock_for_workflow_snapshots(tmp_path):
     )
 
 
+def test_sync_rejects_lock_extension_snapshot_pattern():
+    @dataclass
+    class Workflow:
+        id: str
+
+    with pytest.raises(ValueError, match="reserved"):
+        sync(Workflow("wf-lock"), "{self.id}.lock", manual=True)
+
+
 def test_sync_snapshot_saves_are_serialized_across_threads(tmp_path):
     @dataclass
     class Step:

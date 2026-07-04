@@ -85,6 +85,7 @@ loaded = Article.snapshots.get("dusk-court")
 When two local processes may update the same file, wrap the short
 read-modify-save section in `snapshot.locked(reload=True)`. The lock is
 cooperative and local to the machine, using a `.lock` file beside the snapshot.
+Snapshot filenames ending in `.lock` are reserved for these lock sidecars.
 
 ```python
 from snapclass import snapclass, Stash, Fresh

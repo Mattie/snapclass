@@ -126,6 +126,7 @@ def snapclass(
             cls = _dataclass_with_sidecars(cls, **dataclass_kwargs)
         unknown_policy = _normalize_unknown_policy(unknown, extras_field)
         conflict_policy = _normalize_conflict_policy(conflict)
+        _validate_snapshot_pattern(pattern)
         _validate_require_lock(pattern, manual, require_lock)
         _validate_extras_field(cls, unknown_policy, extras_field)
         config = Config(
@@ -265,6 +266,7 @@ def _install_model_config(
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
     resolved_manual = True if pattern is None else manual
+    _validate_snapshot_pattern(pattern)
     _validate_require_lock(pattern, resolved_manual, require_lock)
     _validate_extras_field(cls, unknown_policy, extras_field)
     config = Config(
@@ -357,6 +359,7 @@ def sync(
     cls = instance.__class__
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
+    _validate_snapshot_pattern(pattern)
     _validate_require_lock(pattern, manual, require_lock)
     _validate_extras_field(cls, unknown_policy, extras_field)
     config = Config(
@@ -782,27 +785,39 @@ class Snapshot:
     @property
     def path(self) -> Path | None:
         if self._path_override is not None:
+            _validate_snapshot_path(self._path_override)
             return self._path_override
         if not self._config.pattern:
             return None
         formatted = self._config.pattern.format(self=_FormatProxy(self._instance))
         path = Path(formatted)
         if path.is_absolute():
+            _validate_snapshot_path(path)
             return path
         if _is_home_relative(path):
-            return path.expanduser().resolve()
+            resolved = path.expanduser().resolve()
+            _validate_snapshot_path(resolved)
+            return resolved
         stash = self._stash or self._config.stash
         _reject_relative_traversal(path, "snapshot pattern")
         if stash is not None:
-            return stash.path / path
+            resolved = stash.path / path
+            _validate_snapshot_path(resolved)
+            return resolved
         if self._config.pattern.startswith("./"):
-            return path.resolve()
+            resolved = path.resolve()
+            _validate_snapshot_path(resolved)
+            return resolved
         root = self._config.module_dir or Path.cwd()
-        return (root / path).resolve()
+        resolved = (root / path).resolve()
+        _validate_snapshot_path(resolved)
+        return resolved
 
     @path.setter
     def path(self, value: str | os.PathLike[str]) -> None:
-        self._path_override = Path(value)
+        path = Path(value)
+        _validate_snapshot_path(path)
+        self._path_override = path
 
     @property
     def relpath(self) -> Path | None:
@@ -1913,6 +1928,20 @@ def _normalize_conflict_policy(conflict: str) -> str:
         choices = ", ".join(sorted(allowed))
         raise ValueError(f"conflict must be one of {choices}; got {conflict!r}")
     return conflict
+
+
+def _validate_snapshot_pattern(pattern: str | None) -> None:
+    if pattern is None:
+        return
+    _validate_snapshot_path(Path(pattern))
+
+
+def _validate_snapshot_path(path: Path) -> None:
+    if _is_lock_path(path):
+        raise ValueError(
+            "Snapshot filenames cannot end with .lock; .lock is reserved for "
+            "snapclass lock files"
+        )
 
 
 def _validate_require_lock(

@@ -453,6 +453,7 @@ writers. It is a good fit for two Python backends sharing the same ordinary loca
 file. Raw writers that ignore the `.lock` side file can still race, and
 network/cloud-synced filesystems, containers, mounted volumes, and mixed
 WSL/Windows access need explicit validation before relying on the lock.
+Snapshot filenames ending in `.lock` are reserved for snapclass lock sidecars.
 
 `snapshot.data` is the serialized mapping before file formatting. `snapshot.text` is the formatted file text for the current pattern or formatter. Setting `snapshot.text` writes the file directly, reloads the object, and still honors conflict policy.
 

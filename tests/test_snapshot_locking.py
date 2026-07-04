@@ -198,6 +198,28 @@ def test_require_lock_rejects_patternless_snapclass():
             name: str
 
 
+def test_snapclass_rejects_lock_extension_snapshot_pattern(tmp_path):
+    with pytest.raises(ValueError, match="reserved"):
+
+        @snapclass("{self.name}.lock", stash=Stash(tmp_path), manual=True)
+        class WorkflowState:
+            name: str
+
+
+def test_snapshot_path_rejects_dynamic_lock_extension_filename(tmp_path):
+    @snapclass("{self.name}", stash=Stash(tmp_path), manual=True)
+    class WorkflowState:
+        name: str
+
+    state = WorkflowState("run.lock")
+
+    with pytest.raises(ValueError, match="reserved"):
+        state.snapshot.save()
+
+    with pytest.raises(ValueError, match="reserved"):
+        state.snapshot.path = tmp_path / "manual.lock"
+
+
 def test_snapshot_locked_rejects_path_changes_inside_lock(tmp_path):
     @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
     class WorkflowState:

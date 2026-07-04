@@ -69,7 +69,7 @@ def _lock_path_for(path: Path) -> Path:
 
 
 def _is_lock_path(path: Path) -> bool:
-    return path.name.endswith(".lock")
+    return path.name.lower().endswith(".lock")
 
 
 def _acquire_os_lock(path: Path) -> BinaryIO:

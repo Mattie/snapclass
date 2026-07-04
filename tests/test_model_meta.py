@@ -176,6 +176,16 @@ def test_model_meta_snapshot_require_lock_requires_pattern():
                 snapshot_require_lock = True
 
 
+def test_model_meta_rejects_lock_extension_snapshot_pattern():
+    with pytest.raises(ValueError, match="reserved"):
+        class Prompt(Model):
+            name: str
+
+            class Meta:
+                snapshot_pattern = "{self.name}.lock"
+                snapshot_manual = True
+
+
 def test_patternless_model_infers_fields_and_exposes_projection_without_path():
     @dataclass
     class Sample(Model):
@@ -398,6 +408,15 @@ def test_create_model_rejects_require_lock_without_pattern():
 
     with pytest.raises(ValueError, match="persisted snapshot pattern"):
         create_model(Prompt, require_lock=True)
+
+
+def test_create_model_rejects_lock_extension_snapshot_pattern():
+    @dataclass
+    class Prompt:
+        name: str
+
+    with pytest.raises(ValueError, match="reserved"):
+        create_model(Prompt, pattern="{self.name}.lock", manual=True)
 
 
 def test_create_model_rejects_non_dataclass():

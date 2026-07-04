@@ -27,7 +27,7 @@ from ._locks import (
 from .collections import Collection, CollectionDescriptor
 from .paths import safe_path_placeholder
 from .formatters import FileFormatter
-from .stash import Stash, _is_home_relative
+from .stash import Stash, _WriteStrategy, _is_home_relative, _normalize_write_strategy
 
 Missing = dataclasses.MISSING
 _MISSING_TYPE = type(dataclasses.MISSING)
@@ -66,6 +66,7 @@ class Config:
     formatter: type[FileFormatter] | None = None
     minimal_diffs: bool | None = None
     write_delay: float | None = None
+    write_strategy: _WriteStrategy | None = None
     unknown: str = "ignore"
     extras_field: str | None = None
     migrate: Callable[..., Mapping[str, Any] | None] | None = None
@@ -85,6 +86,7 @@ class Meta:
     snapshot_formatter: Any = None
     snapshot_minimal_diffs: bool | None = None
     snapshot_write_delay: float | None = None
+    snapshot_write_strategy: _WriteStrategy | None = None
     snapshot_unknown: str = "ignore"
     snapshot_extras_field: str | None = None
     snapshot_migrate: Callable[..., Mapping[str, Any] | None] | None = None
@@ -104,6 +106,7 @@ def snapclass(
     formatter: type[FileFormatter] | None = None,
     minimal_diffs: bool | None = None,
     write_delay: float | None = None,
+    write_strategy: _WriteStrategy | None = None,
     unknown: str = "ignore",
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
@@ -126,6 +129,7 @@ def snapclass(
             cls = _dataclass_with_sidecars(cls, **dataclass_kwargs)
         unknown_policy = _normalize_unknown_policy(unknown, extras_field)
         conflict_policy = _normalize_conflict_policy(conflict)
+        write_strategy_policy = _normalize_write_strategy(write_strategy)
         _validate_snapshot_pattern(pattern)
         _validate_require_lock(pattern, manual, require_lock)
         _validate_extras_field(cls, unknown_policy, extras_field)
@@ -140,6 +144,7 @@ def snapclass(
             formatter=formatter,
             minimal_diffs=minimal_diffs,
             write_delay=write_delay,
+            write_strategy=write_strategy_policy,
             unknown=unknown_policy,
             extras_field=extras_field,
             migrate=migrate,
@@ -163,6 +168,7 @@ def create_model(
     infer: bool | None = None,
     minimal_diffs: bool | None = None,
     write_delay: float | None = None,
+    write_strategy: _WriteStrategy | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
     conflict: str | None = None,
     require_lock: bool | None = None,
@@ -198,6 +204,10 @@ def create_model(
     resolved_write_delay = write_delay if write_delay is not None else (
         getattr(meta, "snapshot_write_delay", None) if meta is not None else None
     )
+    resolved_write_strategy = write_strategy if write_strategy is not None else (
+        getattr(meta, "snapshot_write_strategy", None) if meta is not None else None
+    )
+    resolved_write_strategy = _normalize_write_strategy(resolved_write_strategy)
     unknown = getattr(meta, "snapshot_unknown", "ignore") if meta is not None else "ignore"
     extras_field = getattr(meta, "snapshot_extras_field", None) if meta is not None else None
     resolved_migrate = migrate if migrate is not None else (
@@ -220,6 +230,7 @@ def create_model(
         formatter=formatter,
         minimal_diffs=resolved_minimal_diffs,
         write_delay=resolved_write_delay,
+        write_strategy=resolved_write_strategy,
         unknown=unknown,
         extras_field=extras_field,
         migrate=resolved_migrate,
@@ -236,6 +247,7 @@ def create_model(
         snapshot_formatter=formatter,
         snapshot_minimal_diffs=resolved_minimal_diffs,
         snapshot_write_delay=resolved_write_delay,
+        snapshot_write_strategy=resolved_write_strategy,
         snapshot_unknown=_normalize_unknown_policy(unknown, extras_field),
         snapshot_extras_field=extras_field,
         snapshot_migrate=resolved_migrate,
@@ -257,6 +269,7 @@ def _install_model_config(
     formatter: type[FileFormatter] | None = None,
     minimal_diffs: bool | None = None,
     write_delay: float | None = None,
+    write_strategy: _WriteStrategy | None = None,
     unknown: str = "ignore",
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
@@ -265,6 +278,7 @@ def _install_model_config(
 ) -> None:
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
+    write_strategy_policy = _normalize_write_strategy(write_strategy)
     resolved_manual = True if pattern is None else manual
     _validate_snapshot_pattern(pattern)
     _validate_require_lock(pattern, resolved_manual, require_lock)
@@ -280,6 +294,7 @@ def _install_model_config(
         formatter=formatter,
         minimal_diffs=minimal_diffs,
         write_delay=write_delay,
+        write_strategy=write_strategy_policy,
         unknown=unknown_policy,
         extras_field=extras_field,
         migrate=migrate,
@@ -330,6 +345,7 @@ class Model:
             formatter=getattr(meta, "snapshot_formatter", None),
             minimal_diffs=getattr(meta, "snapshot_minimal_diffs", None),
             write_delay=getattr(meta, "snapshot_write_delay", None),
+            write_strategy=getattr(meta, "snapshot_write_strategy", None),
             unknown=getattr(meta, "snapshot_unknown", "ignore"),
             extras_field=getattr(meta, "snapshot_extras_field", None),
             migrate=getattr(meta, "snapshot_migrate", None),
@@ -350,6 +366,7 @@ def sync(
     formatter: type[FileFormatter] | None = None,
     minimal_diffs: bool | None = None,
     write_delay: float | None = None,
+    write_strategy: _WriteStrategy | None = None,
     unknown: str = "ignore",
     extras_field: str | None = None,
     migrate: Callable[..., Mapping[str, Any] | None] | None = None,
@@ -359,6 +376,7 @@ def sync(
     cls = instance.__class__
     unknown_policy = _normalize_unknown_policy(unknown, extras_field)
     conflict_policy = _normalize_conflict_policy(conflict)
+    write_strategy_policy = _normalize_write_strategy(write_strategy)
     _validate_snapshot_pattern(pattern)
     _validate_require_lock(pattern, manual, require_lock)
     _validate_extras_field(cls, unknown_policy, extras_field)
@@ -373,6 +391,7 @@ def sync(
         formatter=formatter,
         minimal_diffs=minimal_diffs,
         write_delay=write_delay,
+        write_strategy=write_strategy_policy,
         unknown=unknown_policy,
         extras_field=extras_field,
         migrate=migrate,
@@ -732,6 +751,7 @@ class Snapshot:
         infer: bool | None = None,
         minimal_diffs: bool | None = None,
         write_delay: float | None = None,
+        write_strategy: _WriteStrategy | None = None,
         require_lock: bool | None = None,
         root: "Snapshot | None" = None,
     ) -> None:
@@ -746,6 +766,7 @@ class Snapshot:
                 fields=fields or {},
                 minimal_diffs=minimal_diffs,
                 write_delay=write_delay,
+                write_strategy=_normalize_write_strategy(write_strategy),
                 require_lock=False if require_lock is None else require_lock,
             )
             config.type_hints = _safe_type_hints(instance.__class__)
@@ -903,10 +924,11 @@ class Snapshot:
         with _write_lock_for(path):
             self._check_required_lock(path)
             self._check_write_conflict(path)
-            _write_text_atomic(
+            _write_text(
                 path,
                 value,
                 write_delay=_effective_write_delay(self._config, self.stash),
+                write_strategy=_effective_write_strategy(self._config, self.stash),
             )
         self.load()
 
@@ -933,10 +955,11 @@ class Snapshot:
             template = self._loaded_data if self._loaded_path == current_path else None
             rendered_data = _data_for_dump(template, data)
             text = _dump_data(current_path, rendered_data, self._config, self.stash)
-            _write_text_atomic(
+            _write_text(
                 current_path,
                 text,
                 write_delay=_effective_write_delay(self._config, self.stash),
+                write_strategy=_effective_write_strategy(self._config, self.stash),
             )
         self._loaded_data = rendered_data
         self._loaded_path = current_path
@@ -1808,6 +1831,16 @@ def _effective_write_delay(config: Config | None, stash: Stash | None) -> float:
         if value is not None:
             return value
     return sessions.WRITE_DELAY
+
+
+def _effective_write_strategy(config: Config | None, stash: Stash | None) -> _WriteStrategy:
+    if config is not None and config.write_strategy is not None:
+        return config.write_strategy
+    if stash is not None:
+        value = stash.effective_write_strategy()
+        if value is not None:
+            return value
+    return "in_place"
 
 
 def _load_data(path: Path, text: str, config: Config, stash: Stash | None) -> dict[str, Any]:
@@ -2777,26 +2810,42 @@ def _module_dir_for(cls: type) -> Path | None:
     return Path(filename).resolve().parent
 
 
-def _write_text_atomic(path: Path, text: str, *, write_delay: float | None = None) -> None:
-    with _write_lock_for(path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=os.fspath(path.parent), text=True
-        )
-        temp_path = Path(temp_name)
+def _write_text(
+    path: Path,
+    text: str,
+    *,
+    write_delay: float | None = None,
+    write_strategy: _WriteStrategy = "in_place",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if write_strategy == "atomic":
+        _write_text_atomic(path, text)
+    elif write_strategy == "in_place":
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    else:
+        raise ValueError("write_strategy must be 'in_place' or 'atomic'")
+
+    if write_delay is None:
+        write_delay = sessions.WRITE_DELAY
+    if write_delay:
+        time.sleep(write_delay)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=os.fspath(path.parent), text=True
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        _replace_path_atomic(temp_path, path)
+    except Exception:
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(text)
-            _replace_path_atomic(temp_path, path)
-            if write_delay is None:
-                write_delay = sessions.WRITE_DELAY
-            if write_delay:
-                time.sleep(write_delay)
-        except Exception:
-            try:
-                temp_path.unlink(missing_ok=True)
-            finally:
-                raise
+            temp_path.unlink(missing_ok=True)
+        finally:
+            raise
 
 
 def _write_lock_for(path: Path) -> Any:

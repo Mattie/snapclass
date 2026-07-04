@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 from dataclasses import dataclass, field
+from pathlib import Path
 import threading
 
 import pytest
@@ -29,6 +30,35 @@ def test_sync_maps_existing_dataclass_instance_to_snapshot_file(tmp_path):
     text = (tmp_path / "wf-1.yml").read_text(encoding="utf-8")
     assert "draft" in text
     assert "pending" in text
+
+
+def test_sync_accepts_write_strategy(tmp_path, monkeypatch):
+    replaced: list[tuple[Path, Path]] = []
+    original_replace = Path.replace
+
+    def record_replace(self: Path, target: Path) -> Path:
+        replaced.append((self, target))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", record_replace)
+
+    @dataclass
+    class Workflow:
+        id: str
+        status: str = "pending"
+
+    workflow = Workflow("wf-atomic", "running")
+    sync(
+        workflow,
+        str(tmp_path / "{self.id}.yml"),
+        manual=True,
+        write_strategy="atomic",
+    )
+    workflow.snapshot.save()
+
+    assert len(replaced) == 1
+    assert replaced[0][1] == tmp_path / "wf-atomic.yml"
+    assert (tmp_path / "wf-atomic.yml").read_text(encoding="utf-8") == "status: running\n"
 
 
 def test_sync_workflow_lifecycle_snapshot_updates(tmp_path):

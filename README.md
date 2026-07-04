@@ -123,6 +123,18 @@ with state.snapshot.locked(reload=True):
 should go through this pattern. It makes `state.save()` raise unless it is
 called inside `state.snapshot.locked(...)`.
 
+By default, snapclass writes snapshot files in place. This is friendlier to
+active Windows app folders where another process may briefly have the file open
+for reading. If a model or stash should preserve the old complete file until a
+new complete file is ready, opt into same-directory temp-file replacement:
+
+```python
+safe_runs = Stash("./runs", write_strategy="atomic")
+```
+
+Use locks to coordinate cooperative writers. Use `write_strategy="atomic"` when
+the file-integrity tradeoff matters more than compatibility with active readers.
+
 ## FAQ
 
 ### Why use `snapclass` over `datafiles`?

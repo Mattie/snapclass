@@ -102,6 +102,7 @@ def test_conflict_raise_serializes_concurrent_stale_instance_saves(tmp_path, mon
         stash=Stash(tmp_path),
         manual=True,
         conflict="raise",
+        write_strategy="atomic",
     )
     class Item:
         name: str

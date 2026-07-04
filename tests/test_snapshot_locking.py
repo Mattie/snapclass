@@ -84,7 +84,12 @@ def test_snapshot_save_keeps_leaf_symlink_lock_aligned_with_replaced_path(tmp_pa
     alias = tmp_path / "alias.yml"
     _symlink_or_skip(alias, target)
 
-    @snapclass("alias.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass(
+        "alias.yml",
+        stash=Stash(tmp_path),
+        manual=True,
+        write_strategy="atomic",
+    )
     class State:
         steps: list[str] = field(default_factory=list)
 

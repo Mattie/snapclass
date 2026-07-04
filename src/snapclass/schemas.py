@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Any, Callable, Union, get_args, get_origin, get_type_hints, is_typeddict
 
 from . import formatters, serializers, sessions, sidecar
-from ._locks import locked_path as _locked_path, write_lock_for as _shared_write_lock_for
+from ._locks import (
+    _is_lock_path,
+    locked_path as _locked_path,
+    write_lock_for as _shared_write_lock_for,
+)
 from .collections import Collection, CollectionDescriptor
 from .paths import safe_path_placeholder
 from .formatters import FileFormatter
@@ -2568,7 +2572,11 @@ class _PatternMatcher:
         search_root = self.root.joinpath(*static_parts) if static_parts else self.root
         if not search_root.exists():
             return iter(())
-        matches = [path for path in search_root.rglob("*") if self.regex.match(_as_posix(path))]
+        matches = [
+            path
+            for path in search_root.rglob("*")
+            if self.regex.match(_as_posix(path)) and not _is_lock_path(path)
+        ]
         return iter(sorted(matches, key=_as_posix))
 
     def values_from(self, path: Path) -> list[str]:

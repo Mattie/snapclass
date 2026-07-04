@@ -230,6 +230,8 @@ class SidecarSnapshot:
     ) -> None:
         snapshot = getattr(self._instance, "snapshot", None)
         metadata_path: Path | None = None
+        parent_lock = None
+        needs_lock_check = False
         if snapshot is not None:
             needs_lock_check = getattr(snapshot, "require_lock", False) or getattr(
                 snapshot,
@@ -238,11 +240,40 @@ class SidecarSnapshot:
             )
             if needs_lock_check or (save_metadata and self._field):
                 metadata_path = snapshot._require_path()
-                snapshot._check_required_lock(metadata_path)
-            if save_metadata and self._field:
-                if metadata_path is None:
-                    metadata_path = snapshot._require_path()
-                snapshot._check_write_conflict(metadata_path)
+                from .schemas import _write_lock_for
+
+                parent_lock = _write_lock_for(metadata_path)
+        if parent_lock is not None:
+            with parent_lock:
+                self._check_parent_snapshot_before_write(
+                    snapshot,
+                    metadata_path,
+                    needs_lock_check=needs_lock_check,
+                    save_metadata=save_metadata,
+                )
+                self._write_content(value)
+                self._save_pointer_metadata(save_metadata, snapshot)
+            return
+
+        self._write_content(value)
+        self._save_pointer_metadata(save_metadata, snapshot)
+
+    def _check_parent_snapshot_before_write(
+        self,
+        snapshot: Any,
+        metadata_path: Path | None,
+        *,
+        needs_lock_check: bool,
+        save_metadata: bool,
+    ) -> None:
+        if snapshot is None or metadata_path is None:
+            return
+        if needs_lock_check or (save_metadata and self._field):
+            snapshot._check_required_lock(metadata_path)
+        if save_metadata and self._field:
+            snapshot._check_write_conflict(metadata_path)
+
+    def _write_content(self, value: str | builtins.bytes) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self._descriptor.kind == "text":
             if not isinstance(value, str):
@@ -252,6 +283,12 @@ class SidecarSnapshot:
             if not isinstance(value, (builtins.bytes, bytearray, memoryview)):
                 raise TypeError("Bytes sidecars require bytes-like values")
             self.path.write_bytes(builtins.bytes(value))
+
+    def _save_pointer_metadata(
+        self,
+        save_metadata: bool,
+        snapshot: Any,
+    ) -> None:
         if self._field:
             object.__setattr__(self._instance, self._field, self.relpath.as_posix())
             if save_metadata and snapshot is not None:

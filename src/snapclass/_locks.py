@@ -68,6 +68,10 @@ def _lock_path_for(path: Path) -> Path:
     return path.with_name(f"{path.name}.lock")
 
 
+def _is_lock_path(path: Path) -> bool:
+    return path.name.endswith(".lock")
+
+
 def _acquire_os_lock(path: Path) -> BinaryIO:
     lock_path = _lock_path_for(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)

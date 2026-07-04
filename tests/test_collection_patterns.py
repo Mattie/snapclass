@@ -60,6 +60,24 @@ def test_collection_all_returns_matches_in_path_order(tmp_path):
     ]
 
 
+def test_collection_all_ignores_lock_sidecars_for_extensionless_patterns(tmp_path):
+    root = Stash(tmp_path)
+
+    @snapclass("{self.name}", stash=root, manual=True)
+    class WorkflowState:
+        name: str
+        steps: list[str] = field(default_factory=list)
+
+    state = WorkflowState("run", ["created"])
+    with state.snapshot.locked():
+        state.snapshot.save()
+
+    assert (tmp_path / "run.lock").exists()
+    assert [(item.name, item.steps) for item in WorkflowState.snapshots.all()] == [
+        ("run", ["created"]),
+    ]
+
+
 def test_collection_all_honors_repeated_placeholder_segments(tmp_path):
     root = Stash(tmp_path)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import fields
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -245,6 +246,122 @@ def test_sidecar_write_checks_metadata_conflict_before_content_write(tmp_path):
 
     assert body.read_text(encoding="utf-8") == "# Original\n"
     assert "Human edit" in metadata.read_text(encoding="utf-8")
+
+
+def test_require_lock_blocks_pointer_sidecar_write_before_content_write(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+
+    @snapclass(
+        "{self.slug}/article.yml",
+        stash=articles,
+        manual=True,
+        require_lock=True,
+    )
+    class Article:
+        slug: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+
+    article = Article("dusk-court")
+    metadata = tmp_path / "world" / "article" / "dusk-court" / "article.yml"
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+
+    with pytest.raises(SnapclassError, match="active snapshot lock"):
+        article.body = "# Outside lock\n"
+
+    assert article.content_file == ""
+    assert not body.exists()
+
+    with article.snapshot.locked():
+        article.body = "# Inside lock\n"
+
+    assert article.content_file == "dusk-court.md"
+    assert "content_file: dusk-court.md" in metadata.read_text(encoding="utf-8")
+    assert body.read_text(encoding="utf-8") == "# Inside lock\n"
+
+
+def test_require_lock_blocks_competing_thread_sidecar_write_until_lock_released(
+    tmp_path,
+):
+    articles = Stash(tmp_path / "world") / "article"
+
+    @snapclass(
+        "{self.slug}/article.yml",
+        stash=articles,
+        manual=True,
+        require_lock=True,
+    )
+    class Article:
+        slug: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+
+    article = Article("dusk-court")
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+    locked = threading.Event()
+    release = threading.Event()
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    errors: list[Exception] = []
+
+    def hold_parent_lock() -> None:
+        with article.snapshot.locked():
+            locked.set()
+            assert release.wait(timeout=5)
+
+    def write_sidecar_from_other_thread() -> None:
+        assert locked.wait(timeout=5)
+        writer_started.set()
+        try:
+            article.body = "# Other thread\n"
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            writer_done.set()
+
+    holder = threading.Thread(target=hold_parent_lock)
+    writer = threading.Thread(target=write_sidecar_from_other_thread)
+    holder.start()
+    writer.start()
+    try:
+        assert locked.wait(timeout=5)
+        assert writer_started.wait(timeout=5)
+        assert not writer_done.wait(timeout=0.2)
+        assert not body.exists()
+    finally:
+        release.set()
+        holder.join(timeout=5)
+        writer.join(timeout=5)
+
+    assert not holder.is_alive()
+    assert not writer.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], SnapclassError)
+    assert "active snapshot lock" in str(errors[0])
+    assert article.content_file == ""
+    assert not body.exists()
+
+
+def test_require_lock_blocks_constructor_sidecar_write_before_content_write(tmp_path):
+    articles = Stash(tmp_path / "world") / "article"
+
+    @snapclass(
+        "{self.slug}/article.yml",
+        stash=articles,
+        manual=True,
+        require_lock=True,
+    )
+    class Article:
+        slug: str
+        content_file: str = ""
+        body: str = sidecar.text(field="content_file", default="{self.slug}.md")
+
+    body = tmp_path / "world" / "article" / "dusk-court" / "dusk-court.md"
+
+    with pytest.raises(SnapclassError, match="active snapshot lock"):
+        Article("dusk-court", body="# Constructor write\n")
+
+    assert not body.exists()
 
 
 def test_text_sidecar_pointer_stays_relative_after_metadata_move(tmp_path):

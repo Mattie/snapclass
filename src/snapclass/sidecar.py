@@ -240,9 +240,7 @@ class SidecarSnapshot:
             )
             if needs_lock_check or (save_metadata and self._field):
                 metadata_path = snapshot._require_path()
-                from .schemas import _write_lock_for
-
-                parent_lock = _write_lock_for(metadata_path)
+                parent_lock = snapshot._write_lock_for_path(metadata_path)
         if parent_lock is not None:
             with parent_lock:
                 self._check_parent_snapshot_before_write(

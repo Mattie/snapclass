@@ -893,6 +893,12 @@ class Snapshot:
         return self._config.require_lock
 
     @property
+    def write_strategy(self) -> _WriteStrategy:
+        if self._root is not None:
+            return self._root.write_strategy
+        return _effective_write_strategy(self._config, self.stash)
+
+    @property
     def stash(self) -> Stash | None:
         return self._stash or self._config.stash
 
@@ -921,14 +927,14 @@ class Snapshot:
     def text(self, value: str) -> None:
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         path = self._require_path()
-        with _write_lock_for(path):
+        with self._write_lock_for_path(path):
             self._check_required_lock(path)
             self._check_write_conflict(path)
             _write_text(
                 path,
                 value,
                 write_delay=_effective_write_delay(self._config, self.stash),
-                write_strategy=_effective_write_strategy(self._config, self.stash),
+                write_strategy=self.write_strategy,
             )
         self.load()
 
@@ -942,7 +948,7 @@ class Snapshot:
         if path is not None:
             self.path = path
         current_path = self._require_path()
-        with _write_lock_for(current_path):
+        with self._write_lock_for_path(current_path):
             self._check_required_lock(current_path)
             self._check_write_conflict(current_path)
             sidecar.reconcile_before_save(self._instance, current_path)
@@ -959,7 +965,7 @@ class Snapshot:
                 current_path,
                 text,
                 write_delay=_effective_write_delay(self._config, self.stash),
-                write_strategy=_effective_write_strategy(self._config, self.stash),
+                write_strategy=self.write_strategy,
             )
         self._loaded_data = rendered_data
         self._loaded_path = current_path
@@ -1006,7 +1012,7 @@ class Snapshot:
                 "Snapshot path changed while locked; keep path fields stable inside "
                 "snapshot.locked()"
             )
-        with _locked_path(current_path):
+        with _locked_path(_lock_target_for_write(current_path, self.write_strategy)):
             previous_path = self._locked_path
             self._locked_path = current_path
             self._lock_depth += 1
@@ -1041,6 +1047,9 @@ class Snapshot:
                 "and save in `with obj.snapshot.locked():`; use reload=True when "
                 "coordinating shared writers"
             )
+
+    def _write_lock_for_path(self, path: Path) -> Any:
+        return _write_lock_for(path, write_strategy=self.write_strategy)
 
     def _check_write_conflict(self, path: Path) -> None:
         if self._config.conflict != "raise" or not path.exists():
@@ -2848,8 +2857,20 @@ def _write_text_atomic(path: Path, text: str) -> None:
             raise
 
 
-def _write_lock_for(path: Path) -> Any:
-    return _shared_write_lock_for(path)
+def _write_lock_for(
+    path: Path,
+    *,
+    write_strategy: _WriteStrategy = "atomic",
+) -> Any:
+    return _shared_write_lock_for(_lock_target_for_write(path, write_strategy))
+
+
+def _lock_target_for_write(path: Path, write_strategy: _WriteStrategy) -> Path:
+    if write_strategy == "in_place":
+        return path.resolve(strict=False)
+    if write_strategy == "atomic":
+        return path
+    raise ValueError("write_strategy must be 'in_place' or 'atomic'")
 
 
 def _replace_path_atomic(temp_path: Path, path: Path) -> None:

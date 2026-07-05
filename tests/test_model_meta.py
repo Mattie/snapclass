@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ def test_model_exposes_default_meta_configuration():
     assert Model.Meta.snapshot_stash is None
     assert Model.Meta.snapshot_minimal_diffs is None
     assert Model.Meta.snapshot_write_delay is None
+    assert Model.Meta.snapshot_write_strategy is None
     assert Model.Meta.snapshot_unknown == "ignore"
     assert Model.Meta.snapshot_conflict == "overwrite"
     assert Model.Meta.snapshot_require_lock is False
@@ -47,6 +49,29 @@ def test_model_meta_declaration_uses_snapclass_configuration(tmp_path):
     assert "count: 2" in saved
     assert "tags:" in saved
     assert Item.snapshots.get("Alpha").tags == ["fixture"]
+
+
+def test_model_meta_write_strategy_beats_stash_policy(tmp_path, monkeypatch):
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise AssertionError("model write_strategy should override stash policy")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    class Item(Model):
+        name: str
+        value: str = ""
+
+        class Meta:
+            snapshot_pattern = "{self.name}.yml"
+            snapshot_stash = Stash(tmp_path, write_strategy="atomic")
+            snapshot_manual = True
+            snapshot_write_strategy = "in_place"
+
+    item = Item("a", "one")
+    item.snapshot.save()
+
+    assert item.Meta.snapshot_write_strategy == "in_place"
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "value: one\n"
 
 
 def test_dataclass_model_meta_keeps_outer_dataclass_decorator_compatible(tmp_path):
@@ -242,6 +267,36 @@ def test_create_model_can_patch_existing_dataclass_with_pattern(tmp_path):
 
     assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "text: hello\n"
     assert Prompt.snapshots.get("a").text == "hello"
+
+
+def test_create_model_accepts_write_strategy(tmp_path, monkeypatch):
+    replaced: list[tuple[Path, Path]] = []
+    original_replace = Path.replace
+
+    def record_replace(self: Path, target: Path) -> Path:
+        replaced.append((self, target))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", record_replace)
+
+    @dataclass
+    class Prompt:
+        name: str
+        text: str = ""
+
+    create_model(
+        Prompt,
+        pattern=str(tmp_path / "{self.name}.yml"),
+        manual=True,
+        write_strategy="atomic",
+    )
+
+    Prompt("a", "hello").snapshot.save()
+
+    assert Prompt.Meta.snapshot_write_strategy == "atomic"
+    assert len(replaced) == 1
+    assert replaced[0][1] == tmp_path / "a.yml"
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "text: hello\n"
 
 
 def test_create_model_accepts_direct_stash_binding(tmp_path):

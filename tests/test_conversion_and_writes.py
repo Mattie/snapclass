@@ -589,7 +589,12 @@ def test_failed_save_preserves_existing_file(tmp_path):
 
 
 def test_atomic_replace_failure_preserves_existing_file_and_cleans_temp(tmp_path, monkeypatch):
-    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass(
+        "{self.name}.yml",
+        stash=Stash(tmp_path),
+        manual=True,
+        write_strategy="atomic",
+    )
     class Item:
         name: str
         value: str

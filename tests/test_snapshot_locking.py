@@ -84,7 +84,12 @@ def test_snapshot_save_keeps_leaf_symlink_lock_aligned_with_replaced_path(tmp_pa
     alias = tmp_path / "alias.yml"
     _symlink_or_skip(alias, target)
 
-    @snapclass("alias.yml", stash=Stash(tmp_path), manual=True)
+    @snapclass(
+        "alias.yml",
+        stash=Stash(tmp_path),
+        manual=True,
+        write_strategy="atomic",
+    )
     class State:
         steps: list[str] = field(default_factory=list)
 
@@ -103,6 +108,32 @@ def test_snapshot_save_keeps_leaf_symlink_lock_aligned_with_replaced_path(tmp_pa
     }
     assert YAMLFormatter.loads(target.read_text(encoding="utf-8")) == {
         "steps": ["target"],
+    }
+
+
+def test_snapshot_save_resolves_leaf_symlink_lock_for_in_place_writes(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    target = real / "state.yml"
+    target.write_text("steps:\n  - target\n", encoding="utf-8")
+    alias = tmp_path / "alias.yml"
+    _symlink_or_skip(alias, target)
+
+    @snapclass("alias.yml", stash=Stash(tmp_path), manual=True)
+    class State:
+        steps: list[str] = field(default_factory=list)
+
+    state = State.snapshots.get()
+    state.steps.append("alias")
+
+    with state.snapshot.locked():
+        state.snapshot.save()
+        assert (real / "state.yml.lock").exists()
+        assert not (tmp_path / "alias.yml.lock").exists()
+
+    assert alias.is_symlink()
+    assert YAMLFormatter.loads(target.read_text(encoding="utf-8")) == {
+        "steps": ["target", "alias"],
     }
 
 

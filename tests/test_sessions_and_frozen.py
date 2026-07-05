@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, dataclass, field
 import json
+from pathlib import Path
 
 import pytest
 
@@ -416,6 +417,140 @@ def test_write_delay_applies_to_snapshot_text_setter(tmp_path, monkeypatch):
 
     assert sleeps == [0.25]
     assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "value: direct\n"
+
+
+def test_default_write_strategy_writes_in_place_without_replace(tmp_path, monkeypatch):
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise AssertionError("default writes should not replace the target file")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("a", "one")
+    item.snapshot.save()
+    item.value = "two"
+    item.snapshot.save()
+
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "value: two\n"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_snapshot_text_setter_uses_in_place_by_default(tmp_path, monkeypatch):
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise AssertionError("default text setter writes should not replace the target file")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("a", "one")
+    item.snapshot.text = "value: direct\n"
+
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "value: direct\n"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_snapshot_text_setter_can_use_atomic_write_strategy(tmp_path, monkeypatch):
+    replaced: list[tuple[Path, Path]] = []
+    original_replace = Path.replace
+
+    def record_replace(self: Path, target: Path) -> Path:
+        replaced.append((self, target))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", record_replace)
+
+    @snapclass(
+        "{self.name}.yml",
+        stash=Stash(tmp_path),
+        manual=True,
+        write_strategy="atomic",
+    )
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("a", "one")
+    item.snapshot.text = "value: direct\n"
+
+    assert len(replaced) == 1
+    assert replaced[0][0].name.startswith(".a.yml.")
+    assert replaced[0][0].suffix == ".tmp"
+    assert replaced[0][1] == tmp_path / "a.yml"
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "value: direct\n"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_stash_write_strategy_is_scoped_to_that_stash(tmp_path, monkeypatch):
+    replaced: list[tuple[Path, Path]] = []
+    original_replace = Path.replace
+
+    def record_replace(self: Path, target: Path) -> Path:
+        replaced.append((self, target))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", record_replace)
+
+    atomic_stash = Stash(tmp_path / "atomic", write_strategy="atomic")
+    in_place_stash = Stash(tmp_path / "in-place", write_strategy="in_place")
+
+    @snapclass("{self.name}.yml", stash=atomic_stash, manual=True)
+    class AtomicItem:
+        name: str
+        value: str = ""
+
+    @snapclass("{self.name}.yml", stash=in_place_stash, manual=True)
+    class InPlaceItem:
+        name: str
+        value: str = ""
+
+    AtomicItem("a", "one").snapshot.save()
+    InPlaceItem("a", "two").snapshot.save()
+
+    assert len(replaced) == 1
+    assert replaced[0][1] == tmp_path / "atomic" / "a.yml"
+    assert (tmp_path / "atomic" / "a.yml").read_text(encoding="utf-8") == "value: one\n"
+    assert (tmp_path / "in-place" / "a.yml").read_text(encoding="utf-8") == "value: two\n"
+
+
+def test_model_write_strategy_beats_stash_policy(tmp_path, monkeypatch):
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise AssertionError("model write_strategy should override stash policy")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    stash = Stash(tmp_path, write_strategy="atomic")
+
+    @snapclass(
+        "{self.name}.yml",
+        stash=stash,
+        manual=True,
+        write_strategy="in_place",
+    )
+    class Item:
+        name: str
+        value: str = ""
+
+    Item("a", "one").snapshot.save()
+
+    assert (tmp_path / "a.yml").read_text(encoding="utf-8") == "value: one\n"
+
+
+def test_invalid_write_strategy_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="write_strategy"):
+        Stash(tmp_path, write_strategy="sometimes")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="write_strategy"):
+        @snapclass("{self.name}.yml", stash=Stash(tmp_path), write_strategy="sometimes")
+        class Item:
+            name: str
 
 
 def test_hidden_traceback_marks_patched_save_frames():

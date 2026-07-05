@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from . import formatters as _formatters
 from . import serializers as _serializers
@@ -15,6 +15,8 @@ from .paths import safe_path_placeholder
 _FormatterClass = type[_formatters.FileFormatter] | type[_formatters.Formatter]
 _FormatterPolicy = Mapping[str, _FormatterClass]
 _SerializerPolicy = Mapping[type | str, type[_serializers.Serializer]]
+_WriteStrategy = Literal["in_place", "atomic"]
+_WRITE_STRATEGIES = {"in_place", "atomic"}
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class Stash:
     serializers: _SerializerPolicy | None = field(default=None, compare=False)
     minimal_diffs: bool | None = field(default=None, compare=False)
     write_delay: float | None = field(default=None, compare=False)
+    write_strategy: _WriteStrategy | None = field(default=None, compare=False)
     _parent: "Stash | None" = field(default=None, repr=False, compare=False)
     _bindings: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     _resolved: _Resolved | None = field(default=None, init=False, repr=False, compare=False)
@@ -46,6 +49,11 @@ class Stash:
             self,
             "serializers",
             MappingProxyType(_serializers.normalize_serializers(self.serializers)),
+        )
+        object.__setattr__(
+            self,
+            "write_strategy",
+            _normalize_write_strategy(self.write_strategy),
         )
 
     def __truediv__(self, child: str | os.PathLike[str] | "Stash") -> "Stash":
@@ -95,10 +103,12 @@ class Stash:
         *,
         minimal_diffs: bool | None = None,
         write_delay: float | None = None,
+        write_strategy: _WriteStrategy | None = None,
     ) -> "Stash":
         return self._copy(
             minimal_diffs=self.minimal_diffs if minimal_diffs is None else minimal_diffs,
             write_delay=self.write_delay if write_delay is None else write_delay,
+            write_strategy=self.write_strategy if write_strategy is None else write_strategy,
         )
 
     def effective_formatters(self) -> dict[str, type[_formatters.FileFormatter]]:
@@ -121,6 +131,11 @@ class Stash:
             return self.write_delay
         return self._parent.effective_write_delay() if self._parent else None
 
+    def effective_write_strategy(self) -> _WriteStrategy | None:
+        if self.write_strategy is not None:
+            return self.write_strategy
+        return self._parent.effective_write_strategy() if self._parent else None
+
     def _reparent(self, parent: "Stash") -> "Stash":
         if self._parent is None:
             return self._copy(_parent=parent, _bindings=dict(self._bindings))
@@ -137,6 +152,7 @@ class Stash:
             "serializers": self.serializers,
             "minimal_diffs": self.minimal_diffs,
             "write_delay": self.write_delay,
+            "write_strategy": self.write_strategy,
             "_parent": self._parent,
             "_bindings": dict(self._bindings),
         }
@@ -243,6 +259,14 @@ class Stash:
 
 def _is_home_relative(path: Path) -> bool:
     return bool(path.parts) and path.parts[0] == "~"
+
+
+def _normalize_write_strategy(value: str | None) -> _WriteStrategy | None:
+    if value is None:
+        return None
+    if value not in _WRITE_STRATEGIES:
+        raise ValueError("write_strategy must be 'in_place' or 'atomic'")
+    return value  # type: ignore[return-value]
 
 
 def _missing_placeholders(pattern: str, bindings: dict[str, Any]) -> list[str]:

@@ -43,7 +43,7 @@ class Collection:
             return None
 
     def get_or_create(self, *args: Any, **kwargs: Any) -> Any:
-        from .schemas import _attach_snapshot, _mark_snapshot_ready, _write_lock_for
+        from .schemas import _attach_snapshot, _mark_snapshot_ready
 
         __tracebackhide__ = sessions.HIDDEN_TRACEBACK
         instance = self._empty_instance(*args, **kwargs, include_defaults=True)
@@ -52,7 +52,7 @@ class Collection:
         lock = (
             instance.snapshot.locked()
             if getattr(instance.snapshot, "require_lock", False)
-            else _write_lock_for(initial_path)
+            else instance.snapshot._write_lock_for_path(initial_path)
         )
         with lock:
             if instance.snapshot.exists:

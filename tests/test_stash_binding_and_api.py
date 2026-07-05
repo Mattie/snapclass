@@ -719,13 +719,18 @@ def test_stash_policy_helpers_return_augmented_copies():
         .with_formatters({".two": TwoFormatter})
         .with_serializer(Token, TokenSerializer)
         .with_serializers({"OtherToken": OtherSerializer})
-        .with_options(minimal_diffs=False, write_delay=0.125)
+        .with_options(
+            minimal_diffs=False,
+            write_delay=0.125,
+            write_strategy="atomic",
+        )
     )
 
     assert base.effective_formatters() == {}
     assert base.effective_serializers() == {}
     assert base.effective_minimal_diffs() is None
     assert base.effective_write_delay() is None
+    assert base.effective_write_strategy() is None
     assert updated.effective_formatters() == {
         ".one": OneFormatter,
         ".two": TwoFormatter,
@@ -735,6 +740,7 @@ def test_stash_policy_helpers_return_augmented_copies():
     assert updated.effective_serializers()["OtherToken"] is OtherSerializer
     assert updated.effective_minimal_diffs() is False
     assert updated.effective_write_delay() == 0.125
+    assert updated.effective_write_strategy() == "atomic"
 
 
 def test_collection_bound_stash_uses_bound_formatter_policy(tmp_path):

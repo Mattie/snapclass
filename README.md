@@ -4,7 +4,7 @@ Human-readable file persistence for Python dataclasses, an adaptation of the coo
 
 `snapclass` is a small persistence layer built around Python dataclasses.
 Decorate a dataclass, give it a path pattern, and its instances can save and
-load themselves as readable YAML, JSON, TOML, or text.
+load themselves as readable YAML, JSON, TOML, TERSE, or text.
 
 It is built for the stuff that belongs in a repo or project folder: prompts,
 configs, fixtures, lightweight app state, and little durable objects with names.
@@ -12,6 +12,104 @@ configs, fixtures, lightweight app state, and little durable objects with names.
 You can use a `Stash` to pick a different location for the
 serialized file (with env overrides) and have special format rules when you
 need. You can also include a `sidecar` when you have a doc or binary you want to save next to it.
+
+## File Type Support
+
+snapclass picks a built-in formatter from the snapshot file extension:
+
+- `""`, `.yml`, `.yaml`: YAML
+- `.json`: JSON
+- `.json5`: JSON5
+- `.toml`: TOML
+- `.terse`: TERSE
+- `.txt`: raw text for one-field models
+
+TERSE support follows the current draft of
+[`RudsonCarvalho/terse-format`](https://github.com/RudsonCarvalho/terse-format).
+TERSE itself is not finalized yet, so treat `.terse` files as useful for
+experiments and token-efficient local workflows while the upstream format is
+still settling.
+
+### TERSE-Friendly Shapes
+
+TERSE works especially well for arrays of small records with the same primitive
+fields. In snapclass, a list of simple nested dataclasses serializes into a
+schema array, so the field names appear once and the rows stay compact.
+
+```python
+from snapclass import Stash, snapclass
+
+
+@snapclass
+class ScoreRow:
+    rank: int
+    handle: str
+    points: int
+    qualified: bool
+
+
+@snapclass(
+    "{self.week}.terse",
+    stash=Stash("./leaderboards"),
+    manual=True,
+    defaults=True,
+)
+class Leaderboard:
+    week: str
+    scores: list[ScoreRow]
+    published: bool = False
+
+
+board = Leaderboard(
+    "week-32",
+    scores=[
+        ScoreRow(1, "mira", 982, True),
+        ScoreRow(2, "jon-vale", 941, True),
+        ScoreRow(3, "noor", 917, False),
+    ],
+    published=True,
+)
+board.snapshot.save()
+```
+
+`leaderboards/week-32.terse`:
+
+```terse
+scores:
+  #[rank handle points qualified]
+    1 mira 982 T
+    2 jon-vale 941 T
+    3 noor 917 F
+published: T
+```
+
+See `examples/terse_schema_arrays.py` for a runnable version with leaderboard
+and latency-report examples.
+
+### Faster YAML
+
+Install the optional native-assisted YAML path with:
+
+```console
+pip install "snapclass[yaml-fast]"
+```
+
+When the extra is available, built-in YAML snapshots automatically use a fast
+loader and preserve common scalar edits by changing only the affected source
+range. Literal and folded block strings use the same source-local path when
+their style, indentation, and trailing-newline behavior can be retained. Flow
+collections, multiline strings, comments, spacing, blank lines, line endings,
+and quote style can remain untouched elsewhere in the document. These edits do
+not reorder mapping keys.
+
+Every patched document is parsed again and compared with the intended data
+before it is written. New files, structural or type changes, incompatible block
+string changes, anchors, aliases, tags, directives, and uncertain syntax use
+the regular ruamel round-trip path automatically.
+
+Custom model or stash formatters keep their normal precedence. JSON and TERSE
+continue to serialize whole files because their formatter cost is already
+small.
 
 
 

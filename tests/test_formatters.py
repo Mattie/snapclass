@@ -7,7 +7,7 @@ import json
 import pytest
 
 from snapclass import Stash, snapclass, formatters
-from snapclass.formatters import TypedTextFormatter, YAMLFormatter
+from snapclass.formatters import TERSEFormatter, TypedTextFormatter, YAMLFormatter
 
 
 def test_json_format_round_trips(tmp_path):
@@ -74,6 +74,121 @@ def test_toml_enum_values_round_trip(tmp_path):
 
     path.write_text("path_type = 1\n", encoding="utf-8")
     assert Config.snapshots.get("sample").path_type is FileOutputType.IN_MESSAGE
+
+
+def test_terse_format_round_trips_nested_values(tmp_path):
+    @snapclass
+    class Style:
+        voice: str
+        temperature: float
+
+    @snapclass("{self.slug}.terse", stash=Stash(tmp_path), manual=True, defaults=True)
+    class Article:
+        slug: str
+        title: str
+        style: Style
+        tags: list[str]
+        active: bool = True
+        subtitle: str | None = None
+
+    Article(
+        "dusk-court",
+        "Dusk Court",
+        Style("warm", 0.4),
+        ["myth", "prompt"],
+    ).snapshot.save()
+
+    path = tmp_path / "dusk-court.terse"
+    assert path.read_text(encoding="utf-8") == (
+        'title: "Dusk Court"\n'
+        "style: {voice:warm temperature:0.4}\n"
+        "tags: [myth prompt]\n"
+        "active: T\n"
+        "subtitle: ~\n"
+    )
+
+    loaded = Article.snapshots.get("dusk-court")
+
+    assert loaded.title == "Dusk Court"
+    assert loaded.style == Style("warm", 0.4)
+    assert loaded.tags == ["myth", "prompt"]
+    assert loaded.active is True
+    assert loaded.subtitle is None
+
+
+def test_terse_schema_array_and_comments_round_trip(tmp_path):
+    data = {
+        "users": [
+            {"id": 1, "name": "Alice Smith", "active": True},
+            {"id": 2, "name": "Bob Lee", "active": False},
+        ],
+        "total": 2,
+    }
+
+    text = formatters.serialize(data, ".terse")
+
+    assert text == (
+        "users:\n"
+        "  #[id name active]\n"
+        '    1 "Alice Smith" T\n'
+        '    2 "Bob Lee" F\n'
+        "total: 2\n"
+    )
+
+    path = tmp_path / "users.terse"
+    path.write_text("// generated fixture\n" + text, encoding="utf-8")
+    assert formatters.deserialize(path, ".terse") == data
+
+
+def test_terse_nested_schema_array_round_trips():
+    data = {
+        "article": {
+            "version_history": [
+                {"timestamp": "2026-07-02T22:43:59", "title": "Trust"},
+                {"timestamp": "2026-07-03T01:09:05", "title": "Strahd"},
+            ],
+        },
+    }
+
+    text = TERSEFormatter.dumps(data)
+
+    assert TERSEFormatter.loads(text) == data
+
+
+def test_terse_snapshot_text_setter_loads_document(tmp_path):
+    @snapclass("{self.name}.terse", stash=Stash(tmp_path), manual=True)
+    class Config:
+        name: str
+        value: int = 0
+        enabled: bool = False
+
+    config = Config("sample")
+    config.snapshot.text = "value: 42\nenabled: T\n"
+
+    assert config.value == 42
+    assert config.enabled is True
+
+
+def test_terse_non_mapping_file_loads_as_empty_data_for_defaults(tmp_path):
+    @snapclass("{self.name}.terse", stash=Stash(tmp_path), manual=True)
+    class Config:
+        name: str
+        value: int = 7
+
+    (tmp_path / "sample.terse").write_text("[1 2 3]\n", encoding="utf-8")
+
+    assert Config.snapshots.get("sample").value == 7
+
+
+def test_terse_rejects_invalid_values():
+    with pytest.raises(ValueError, match="non-finite"):
+        formatters.serialize({"value": float("inf")}, ".terse")
+
+    with pytest.raises(ValueError, match="keys must be strings"):
+        formatters.serialize({1: "one"}, ".terse")
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        TERSEFormatter.loads("value: 1\nvalue: 2\n")
 
 
 def test_no_extension_files_default_to_yaml(tmp_path):
@@ -157,14 +272,17 @@ def test_formatters_deserialize_non_mapping_structured_files_as_empty_data(tmp_p
     yaml_path = tmp_path / "sample.yaml"
     json_path = tmp_path / "sample.json"
     json5_path = tmp_path / "sample.json5"
+    terse_path = tmp_path / "sample.terse"
 
     yaml_path.write_text("- one\n- two\n", encoding="utf-8")
     json_path.write_text("[1, 2]\n", encoding="utf-8")
     json5_path.write_text("[1, 2,]\n", encoding="utf-8")
+    terse_path.write_text("[1 2]\n", encoding="utf-8")
 
     assert formatters.deserialize(yaml_path, ".yaml") == {}
     assert formatters.deserialize(json_path, ".json") == {}
     assert formatters.deserialize(json5_path, ".json5") == {}
+    assert formatters.deserialize(terse_path, ".terse") == {}
 
 
 def test_formatters_deserialize_custom_formatter_non_mapping_as_empty_data(tmp_path):

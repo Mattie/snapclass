@@ -267,6 +267,15 @@ def test_formatters_serialize_matches_readable_json_shape():
     assert formatters.serialize({"value": 1}, ".json") == '{\n  "value": 1\n}'
 
 
+def test_formatters_serialize_matches_readable_terse_shape():
+    assert formatters.TERSE.extensions() == {".terse"}
+    assert formatters.TERSEFormatter.extensions == {".terse"}
+    assert formatters.serialize({"value": 1, "enabled": True}, ".terse") == (
+        "value: 1\n"
+        "enabled: T\n"
+    )
+
+
 def test_formatters_json5_accepts_comments(tmp_path):
     path = tmp_path / "config.json5"
     path.write_text("{// comment\nvalue: 1, label: 'ok'}", encoding="utf-8")
@@ -387,3 +396,23 @@ def test_auto_infers_list_item_serializers_from_existing_file(tmp_path, monkeypa
         "empty_list:\n"
         "  - 7.8\n"
     )
+
+
+def test_readme_documents_file_type_support_and_terse_status():
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+
+    assert "## File Type Support" in text
+    assert ".terse" in text
+    assert "TERSE itself is not finalized yet" in text
+    assert "https://github.com/RudsonCarvalho/terse-format" in text
+
+
+def test_third_party_notices_include_terse_attribution():
+    notices = Path(__file__).resolve().parents[1] / "THIRD_PARTY_NOTICES.md"
+    text = notices.read_text(encoding="utf-8")
+
+    assert "terse-py" in text
+    assert "https://github.com/RudsonCarvalho/terse-py" in text
+    assert "https://github.com/RudsonCarvalho/terse-format" in text
+    assert "CC BY 4.0" in text

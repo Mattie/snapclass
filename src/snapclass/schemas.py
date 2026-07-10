@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Union, get_args, get_origin, get_type_hints, is_typeddict
 
-from . import formatters, serializers, sessions, sidecar
+from . import _yaml_fast, formatters, serializers, sessions, sidecar
 from ._locks import (
     _is_lock_path,
     locked_path as _locked_path,
@@ -778,6 +778,7 @@ class Snapshot:
         self._last_mtime: float | None = None
         self._loaded_data: dict[str, Any] | None = None
         self._loaded_path: Path | None = None
+        self._yaml_state: _yaml_fast.YAMLState | None = None
         self._ready = False
         self._lock_depth = 0
         self._locked_path: Path | None = None
@@ -865,7 +866,8 @@ class Snapshot:
             return True
         if self._last_text is None:
             return False
-        return self.path.read_text(encoding="utf-8") != self._last_text
+        formatter = _formatter_for(self.path, self._config, self.stash)
+        return _read_snapshot_text(self.path, formatter) != self._last_text
 
     @modified.setter
     def modified(self, modified: bool) -> None:
@@ -958,9 +960,45 @@ class Snapshot:
                 include_default_values,
                 stash=self.stash,
             )
-            template = self._loaded_data if self._loaded_path == current_path else None
+            same_path = self._loaded_path == current_path
+            template = self._loaded_data if same_path else None
             rendered_data = _data_for_dump(template, data)
-            text = _dump_data(current_path, rendered_data, self._config, self.stash)
+            formatter = _formatter_for(current_path, self._config, self.stash)
+            next_yaml_state: _yaml_fast.YAMLState | None = None
+            if (
+                same_path
+                and self._last_text is not None
+                and self._loaded_data is not None
+                and formatter in (
+                    formatters.YAMLFormatter,
+                    formatters.TERSEFormatter,
+                    formatters.JSONFormatter,
+                )
+                and _yaml_fast.semantic_equal(rendered_data, self._loaded_data)
+            ):
+                text = self._last_text
+                next_yaml_state = self._yaml_state
+            else:
+                patched = None
+                if (
+                    same_path
+                    and formatter is formatters.YAMLFormatter
+                    and self._yaml_state is not None
+                    and self._config.migrate is None
+                ):
+                    patched = _yaml_fast.patch(self._yaml_state, rendered_data)
+                if patched is not None:
+                    text, next_yaml_state = patched
+                else:
+                    if (
+                        same_path
+                        and formatter is formatters.YAMLFormatter
+                        and self._yaml_state is not None
+                        and self._last_text is not None
+                    ):
+                        template = formatters.YAMLFormatter.loads(self._last_text)
+                        rendered_data = _data_for_dump(template, data)
+                    text = formatter.dumps(rendered_data)
             _write_text(
                 current_path,
                 text,
@@ -969,6 +1007,7 @@ class Snapshot:
             )
         self._loaded_data = rendered_data
         self._loaded_path = current_path
+        self._yaml_state = next_yaml_state
         self._last_text = text
         self.modified = False
 
@@ -982,9 +1021,20 @@ class Snapshot:
         if path is not None:
             self.path = path
         current_path = self._require_path()
-        text = current_path.read_text(encoding="utf-8")
         try:
-            data = _load_data(current_path, text, self._config, self.stash)
+            formatter = _formatter_for(current_path, self._config, self.stash)
+        except Exception as exc:
+            raise SnapclassError(f"Failed to load {current_path}: {exc}") from exc
+        text = _read_snapshot_text(current_path, formatter)
+        try:
+            fast_loaded = None
+            if formatter is formatters.YAMLFormatter and self._config.migrate is None:
+                fast_loaded = _yaml_fast.load(text)
+            if fast_loaded is None:
+                data = _load_data(current_path, text, self._config, self.stash)
+                yaml_state = None
+            else:
+                data, yaml_state = fast_loaded
         except Exception as exc:
             raise SnapclassError(f"Failed to load {current_path}: {exc}") from exc
         object.__setattr__(self._instance, "_snapclass_loading", True)
@@ -996,6 +1046,7 @@ class Snapshot:
             _wrap_mutables(self._instance)
             self._loaded_data = data
             self._loaded_path = current_path
+            self._yaml_state = yaml_state
             self._last_text = text
             self.modified = False
             _mark_snapshot_ready(self._instance)
@@ -1062,7 +1113,8 @@ class Snapshot:
             raise SnapclassError(
                 f"Refusing to overwrite externally modified file: {path}"
             )
-        if self._last_text is not None and path.read_text(encoding="utf-8") != self._last_text:
+        formatter = _formatter_for(path, self._config, self.stash)
+        if self._last_text is not None and _read_snapshot_text(path, formatter) != self._last_text:
             raise SnapclassError(
                 f"Refusing to overwrite externally modified file: {path}"
             )
@@ -1853,11 +1905,7 @@ def _effective_write_strategy(config: Config | None, stash: Stash | None) -> _Wr
 
 
 def _load_data(path: Path, text: str, config: Config, stash: Stash | None) -> dict[str, Any]:
-    formatter = formatters.formatter_for(
-        path,
-        config.formatter,
-        formatters=_effective_formatters(stash),
-    )
+    formatter = _formatter_for(path, config, stash)
     loads_path = getattr(formatter, "loads_path", None)
     if loads_path is not None:
         data = loads_path(path, text)
@@ -1915,11 +1963,25 @@ def _dump_data(
     config: Config,
     stash: Stash | None,
 ) -> str:
+    return _formatter_for(path, config, stash).dumps(data)
+
+
+def _formatter_for(
+    path: Path,
+    config: Config,
+    stash: Stash | None,
+) -> type[FileFormatter]:
     return formatters.formatter_for(
         path,
         config.formatter,
         formatters=_effective_formatters(stash),
-    ).dumps(data)
+    )
+
+
+def _read_snapshot_text(path: Path, formatter: type[FileFormatter]) -> str:
+    if formatter is formatters.YAMLFormatter:
+        return path.read_bytes().decode("utf-8")
+    return path.read_text(encoding="utf-8")
 
 
 def _data_for_dump(template: dict[str, Any] | None, data: dict[str, Any]) -> dict[str, Any]:

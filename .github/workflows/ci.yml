@@ -37,6 +37,30 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
+  test-yaml-fast:
+    name: Test optional fast YAML
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install package with fast YAML dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,yaml-fast]"
+
+      - name: Run tests
+        run: python -m pytest
+
   build:
     name: Build package
     runs-on: ubuntu-latest

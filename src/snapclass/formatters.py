@@ -9,6 +9,8 @@ from typing import Any, ClassVar, IO
 
 from ruamel.yaml import YAML as RuamelYAML
 
+from . import _terse
+
 
 def _empty_if_not_mapping(data: Any) -> dict[str, Any]:
     if data is None:
@@ -215,6 +217,18 @@ class TOMLFormatter(FileFormatter):
         return tomlkit.dumps(data)
 
 
+class TERSEFormatter(FileFormatter):
+    extensions = {".terse"}
+
+    @classmethod
+    def loads(cls, text: str) -> dict[str, Any]:
+        return _empty_if_not_mapping(_terse.loads(text))
+
+    @classmethod
+    def dumps(cls, data: dict[str, Any]) -> str:
+        return _terse.serialize_document(data)
+
+
 _DEFAULT_FILE_FORMATTERS: dict[str, type[FileFormatter]] = {
     "": YAMLFormatter,
     ".yml": YAMLFormatter,
@@ -222,6 +236,7 @@ _DEFAULT_FILE_FORMATTERS: dict[str, type[FileFormatter]] = {
     ".json": JSONFormatter,
     ".json5": JSON5Formatter,
     ".toml": TOMLFormatter,
+    ".terse": TERSEFormatter,
     ".txt": TextFormatter,
 }
 
@@ -371,6 +386,20 @@ class YAML(Formatter):
         return text
 
 
+class TERSE(Formatter):
+    @classmethod
+    def extensions(cls) -> set[str]:
+        return {".terse"}
+
+    @classmethod
+    def deserialize(cls, file_object: IO[str]) -> dict[str, Any]:
+        return _empty_if_not_mapping(_terse.loads(file_object.read()))
+
+    @classmethod
+    def serialize(cls, data: Any) -> str:
+        return _terse.dumps(data)
+
+
 _DEFAULT_FORMATTERS: dict[str, type[Formatter]] = {
     "": YAML,
     ".yml": YAML,
@@ -378,6 +407,7 @@ _DEFAULT_FORMATTERS: dict[str, type[Formatter]] = {
     ".json": JSON,
     ".json5": JSON5,
     ".toml": TOML,
+    ".terse": TERSE,
 }
 
 

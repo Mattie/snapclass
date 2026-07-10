@@ -37,6 +37,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+benchmark = [
+  "tiktoken>=0.7,<1",
+]
+yaml-fast = [
+  "ruamel.yaml.clib>=0.2.15,<0.3",
+  "tree-sitter>=0.25,<0.27",
+  "tree-sitter-yaml>=0.7.2,<0.8",
+]
 test = [
   "pytest>=8",
 ]

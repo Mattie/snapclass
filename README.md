@@ -13,6 +13,71 @@ You can use a `Stash` to pick a different location for the
 serialized file (with env overrides) and have special format rules when you
 need. You can also include a `sidecar` when you have a doc or binary you want to save next to it.
 
+## ORM is a snap!
+
+```python
+from snapclass import snapclass
+
+@snapclass("{self.name}.yml")
+class Note:
+    name: str
+    title: str
+    body: str = ""
+
+mynote = Note(
+    "first_note",
+    "Today I used snapclass!",
+    "It was my first day of snapclass. My note was saved to YAML for me!",
+)
+mynote.snapshot.save()
+
+# Load it back later with the same name.
+same_note = Note.snapshots.get("first_note")
+```
+
+```python
+from snapclass import snapclass, Stash, Fresh
+
+# Create a default location with an environment override.
+runsloc = Stash("./runs", env="RUNS_DIR")
+
+@snapclass("{self.name}.yml", stash=runsloc)
+class RunData:
+    name: str
+    # shortcuts for common boilerplate factory code
+    metrics: dict[str, float] = Fresh.Dict
+
+RunData("baseline", {"accuracy": 0.98, "loss": 0.04}).snapshot.save()
+```
+
+```python
+from snapclass import snapclass, Stash, sidecar
+
+@snapclass
+class Style:
+    voice: str
+    temperature: float
+
+# Locations can be nested with stashes.
+app = Stash("./myapp", env="MYAPP_DATA")
+articles = app / "articles"
+
+@snapclass("{self.slug}/article.yml", stash=articles)
+class Article:
+    slug: str
+    title: str
+    style: Style
+    body: str = sidecar.text("{self.slug}.md")
+
+article = Article(
+    "dusk-court",
+    "Dusk Court",
+    Style("warm", 0.4),
+    body="# Dusk Court\n\nBe brief, warm, and useful.\n",
+)
+loaded = Article.snapshots.get("dusk-court")
+```
+
 ## File Type Support
 
 snapclass picks a built-in formatter from the snapshot file extension:
@@ -110,73 +175,6 @@ the regular ruamel round-trip path automatically.
 Custom model or stash formatters keep their normal precedence. JSON and TERSE
 continue to serialize whole files because their formatter cost is already
 small.
-
-
-
-## ORM is a snap!
-
-```python
-from snapclass import snapclass
-
-@snapclass("{self.name}.yml")
-class Note:
-    name: str
-    title: str
-    body: str = ""
-
-mynote = Note(
-    "first_note",
-    "Today I used snapclass!",
-    "It was my first day of snapclass. My note was saved to YAML for me!",
-)
-mynote.snapshot.save()
-
-# Load it back later with the same name.
-same_note = Note.snapshots.get("first_note")
-```
-
-```python
-from snapclass import snapclass, Stash, Fresh
-
-# Create a default location with an environment override.
-runsloc = Stash("./runs", env="RUNS_DIR")
-
-@snapclass("{self.name}.yml", stash=runsloc)
-class RunData:
-    name: str
-    # shortcuts for common boilerplate factory code
-    metrics: dict[str, float] = Fresh.Dict
-
-RunData("baseline", {"accuracy": 0.98, "loss": 0.04}).snapshot.save()
-```
-
-```python
-from snapclass import snapclass, Stash, sidecar
-
-@snapclass
-class Style:
-    voice: str
-    temperature: float
-
-# Locations can be nested with stashes.
-app = Stash("./myapp", env="MYAPP_DATA")
-articles = app / "articles"
-
-@snapclass("{self.slug}/article.yml", stash=articles)
-class Article:
-    slug: str
-    title: str
-    style: Style
-    body: str = sidecar.text("{self.slug}.md")
-
-article = Article(
-    "dusk-court",
-    "Dusk Court",
-    Style("warm", 0.4),
-    body="# Dusk Court\n\nBe brief, warm, and useful.\n",
-)
-loaded = Article.snapshots.get("dusk-court")
-```
 
 ## Coordinating Shared Files
 

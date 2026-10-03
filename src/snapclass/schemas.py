@@ -43,6 +43,28 @@ class SnapclassError(Exception):
     pass
 
 
+_FIELD_NAMES: "weakref.WeakKeyDictionary[type, frozenset[str]]" = weakref.WeakKeyDictionary()
+
+
+def _field_names(cls: type) -> frozenset[str]:
+    names = _FIELD_NAMES.get(cls)
+    if names is None:
+        names = frozenset(field.name for field in dataclasses.fields(cls))
+        _FIELD_NAMES[cls] = names
+    return names
+
+
+def _stat_if_exists(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except (OSError, ValueError):
+        # Defer to Path.exists() so "missing" means the same as before on
+        # every supported Python version; anything else still raises.
+        if not path.exists():
+            return None
+        raise
+
+
 def _is_missing(value: Any) -> bool:
     return value is Missing or value is _MISSING_TYPE
 
@@ -652,8 +674,7 @@ def _install(cls: type, config: Config) -> None:
             should_track
             and _auto_enabled(snapshot._config, self)
             and not getattr(self, "_snapclass_loading", False)
-            and snapshot.exists
-            and snapshot.modified
+            and snapshot._needs_reload()
         ):
             snapshot.load()
         original_setattr(self, name, value)
@@ -668,9 +689,7 @@ def _install(cls: type, config: Config) -> None:
                 object.__setattr__(self, name, _track_value(value, snapshot))
             elif dataclasses.is_dataclass(value) and not isinstance(value, type):
                 _wrap_dataclass_mutables(value, snapshot, set())
-            if snapshot._config.infer and name not in {
-                field.name for field in dataclasses.fields(self)
-            }:
+            if snapshot._config.infer and name not in _field_names(self.__class__):
                 inferred = set(getattr(self, _INFERRED_FIELDS_ATTR, set()))
                 inferred.add(name)
                 object.__setattr__(self, _INFERRED_FIELDS_ATTR, inferred)
@@ -697,15 +716,13 @@ def _install(cls: type, config: Config) -> None:
             return original_getattribute(self, name)
         snapshot = object.__getattribute__(self, "__dict__").get("snapshot")
         config = snapshot._config if snapshot is not None else object.__getattribute__(self, "__class__").__snapclass_config__
-        field_names = {field.name for field in dataclasses.fields(self)}
         if (
-            name in field_names
+            name in _field_names(object.__getattribute__(self, "__class__"))
             and snapshot is not None
             and _auto_enabled(config, self)
             and not object.__getattribute__(self, "__dict__").get("_snapclass_initializing", False)
             and not object.__getattribute__(self, "__dict__").get("_snapclass_loading", False)
-            and snapshot.exists
-            and snapshot.modified
+            and snapshot._needs_reload()
         ):
             snapshot.load()
         return original_getattribute(self, name)
@@ -859,16 +876,30 @@ class Snapshot:
 
     @property
     def modified(self) -> bool:
-        if not self.exists:
+        path = self.path
+        stat = _stat_if_exists(path) if path is not None else None
+        if stat is None:
             return True
+        return self._modified_since(path, stat)
+
+    def _needs_reload(self) -> bool:
+        # Equivalent to `self.exists and self.modified`, but resolves the path
+        # and stats the file once.
+        path = self.path
+        stat = _stat_if_exists(path) if path is not None else None
+        if stat is None:
+            return False
+        return self._modified_since(path, stat)
+
+    def _modified_since(self, path: Path, stat: os.stat_result) -> bool:
         if self._last_mtime is None:
             return True
-        if self.path.stat().st_mtime != self._last_mtime:
+        if stat.st_mtime != self._last_mtime:
             return True
         if self._last_text is None:
             return False
-        formatter = _formatter_for(self.path, self._config, self.stash)
-        return _read_snapshot_text(self.path, formatter) != self._last_text
+        formatter = _formatter_for(path, self._config, self.stash)
+        return _read_snapshot_text(path, formatter) != self._last_text
 
     @modified.setter
     def modified(self, modified: bool) -> None:
@@ -2078,7 +2109,7 @@ def _preserved_unknown_data(
     data = getattr(instance, _UNKNOWN_DATA_ATTR, {})
     if not isinstance(data, dict):
         return {}
-    known_fields = {field.name for field in dataclasses.fields(instance)}
+    known_fields = _field_names(instance.__class__)
     return {
         key: _plain(value, minimal_diffs)
         for key, value in data.items()
@@ -2089,7 +2120,7 @@ def _preserved_unknown_data(
 def _prepare_data_with_unknowns(
     instance: object, data: dict[str, Any], config: Config
 ) -> dict[str, Any]:
-    field_names = {field.name for field in dataclasses.fields(instance)}
+    field_names = _field_names(instance.__class__)
     unknown_data = {key: value for key, value in data.items() if key not in field_names}
 
     if config.unknown == "preserve":
@@ -2145,7 +2176,7 @@ def _inferred_attr_names(instance: object) -> set[str]:
     names = getattr(instance, _INFERRED_FIELDS_ATTR, set())
     if not isinstance(names, set):
         return set()
-    known_fields = {field.name for field in dataclasses.fields(instance)}
+    known_fields = _field_names(instance.__class__)
     return {name for name in names if name not in known_fields}
 
 

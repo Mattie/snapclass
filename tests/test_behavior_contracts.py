@@ -416,3 +416,59 @@ def test_lifecycle_hook_failures_include_hook_name_and_path(tmp_path):
     loaded_message = str(loaded_error.value)
     assert "__snapclass_loaded__" in loaded_message
     assert "loaded.yml" in loaded_message
+
+
+def test_automatic_reads_reload_edits_that_keep_size_and_mtime(tmp_path):
+    import os
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    path = tmp_path / "sample.yml"
+    before = path.stat()
+    path.write_text(path.read_text(encoding="utf-8").replace("first", "edits"), encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_size == before.st_size
+    assert path.stat().st_mtime == before.st_mtime
+
+    assert item.value == "edits"
+
+
+def test_conflict_raise_detects_edits_that_keep_size_and_mtime(tmp_path):
+    import os
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True, conflict="raise")
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    item.snapshot.save()
+    path = tmp_path / "sample.yml"
+    before = path.stat()
+    path.write_text(path.read_text(encoding="utf-8").replace("first", "edits"), encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert item.snapshot.modified is True
+    item.value = "local"
+    with pytest.raises(SnapclassError, match="externally modified"):
+        item.snapshot.save()
+
+
+def test_snapshot_modified_and_reload_checks_for_missing_files(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    assert item.snapshot.modified is True
+    assert item.snapshot._needs_reload() is False
+    item.snapshot.save()
+    assert item.snapshot.modified is False
+    (tmp_path / "sample.yml").unlink()
+    assert item.snapshot.modified is True
+    assert item.snapshot._needs_reload() is False

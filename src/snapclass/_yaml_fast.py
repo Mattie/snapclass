@@ -214,7 +214,7 @@ def _index_scalars(
     root = tree.root_node
     if root.has_error:
         return None
-    if _contains_unsupported_syntax(root):
+    if _contains_unsupported_syntax(root, source):
         return None
     document_nodes = [child for child in root.named_children if child.type == "document"]
     if len(document_nodes) != 1:
@@ -229,7 +229,14 @@ def _index_scalars(
     return scalars, block_scalars
 
 
-def _contains_unsupported_syntax(root: Any) -> bool:
+_UNSUPPORTED_SYNTAX_MARKERS = (b"&", b"*", b"!", b"%")
+
+
+def _contains_unsupported_syntax(root: Any, source: bytes) -> bool:
+    # Anchors, aliases, tags and directives each need one of these indicator
+    # characters, so a document without any of them can skip the tree walk.
+    if not any(marker in source for marker in _UNSUPPORTED_SYNTAX_MARKERS):
+        return False
     unsupported = {
         "alias",
         "anchor",

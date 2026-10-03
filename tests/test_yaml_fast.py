@@ -487,13 +487,36 @@ def test_fast_yaml_retains_quoted_scalar_types_used_during_coercion():
     "text",
     [
         "base: &base one\nvalue: *base\n",
+        "value: &anchor one\n",
+        "items:\n  - &first one\n  - *first\n",
         "%YAML 1.2\n---\nvalue: one\n",
+        "%TAG !e! tag:example.com,2000:\n---\nvalue: !e!thing one\n",
         "value: !example one\n",
+        "value: !!str one\n",
+        "value: !<tag:yaml.org,2002:str> one\n",
         "value: one",
     ],
 )
 def test_fast_yaml_declines_unsupported_document_shapes(text):
     assert _yaml_fast.load(text) is None
+
+
+@requires_fast_yaml
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ratio: 50%\n",
+        "glob: '*.yml'\n",
+        "note: salt & pepper\n",
+        "shout: wow!\n",
+        "body: |\n  100% & *all* done!\n",
+    ],
+)
+def test_fast_yaml_loads_indicator_characters_inside_content(text):
+    loaded = _yaml_fast.load(text)
+
+    assert loaded is not None
+    assert _yaml_fast.semantic_equal(loaded[0], YAMLFormatter.loads(text))
 
 
 def test_custom_yaml_formatter_does_not_enter_fast_yaml_path(tmp_path, monkeypatch):

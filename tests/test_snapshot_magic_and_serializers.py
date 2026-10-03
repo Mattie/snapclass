@@ -946,3 +946,32 @@ def test_stash_serializer_type_key_also_supports_class_name_annotation(tmp_path)
         TokenRecord.snapshots.get("sample").token,
         SnapclassRegistryNameTestToken,
     )
+
+
+def test_serializer_call_parameters_are_cached_per_function():
+    from snapclass import serializers
+    from snapclass.schemas import _SERIALIZER_PARAMETERS, _call_serializer
+
+    first = serializers.serializer_for_hint(list[serializers.String])
+    second = serializers.serializer_for_hint(list[serializers.String])
+    assert first is not second
+
+    assert _call_serializer(first.to_python_value, ["a"], None) == ["a"]
+    assert _call_serializer(second.to_python_value, ["b"], None) == ["b"]
+    assert first.to_python_value.__func__ is second.to_python_value.__func__
+    assert first.to_python_value.__func__ in _SERIALIZER_PARAMETERS
+
+
+def test_serializer_call_handles_callables_without_func():
+    from snapclass.schemas import _call_serializer
+
+    calls = []
+
+    def plain(value, target_object=None):
+        calls.append(target_object)
+        return value
+
+    marker = object()
+    assert _call_serializer(plain, 1, marker) == 1
+    assert _call_serializer(lambda value: value, 2, marker) == 2
+    assert calls == [marker]

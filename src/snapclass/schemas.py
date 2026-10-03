@@ -12,6 +12,7 @@ import tempfile
 import time
 import types
 import warnings
+import weakref
 from collections import Counter, defaultdict, deque
 from collections.abc import Iterator, Mapping, MutableMapping, Set as AbstractSet
 from contextlib import contextmanager
@@ -2324,17 +2325,44 @@ def _to_preserialization_value(
     )
 
 
-def _call_serializer(method: Any, value: Any, target_object: Any, **kwargs: Any) -> Any:
+_SERIALIZER_PARAMETERS: "weakref.WeakKeyDictionary[Any, tuple[frozenset[str], bool]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _serializer_parameters(method: Any) -> tuple[frozenset[str], bool]:
+    # Serializer classes made by map_type() are new on each call but share the
+    # underlying function, so cache on __func__ rather than the bound method.
+    func = getattr(method, "__func__", None)
+    if func is not None:
+        try:
+            cached = _SERIALIZER_PARAMETERS.get(func)
+        except TypeError:
+            func = None
+        else:
+            if cached is not None:
+                return cached
     parameters = inspect.signature(method).parameters
+    result = (
+        frozenset(parameters),
+        any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ),
+    )
+    if func is not None:
+        _SERIALIZER_PARAMETERS[func] = result
+    return result
+
+
+def _call_serializer(method: Any, value: Any, target_object: Any, **kwargs: Any) -> Any:
+    parameters, accepts_var_keyword = _serializer_parameters(method)
     optional_kwargs = {
         name: value
         for name, value in kwargs.items()
         if value is not None and name in parameters
     }
-    if any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    ):
+    if accepts_var_keyword:
         extra_kwargs = {key: item for key, item in kwargs.items() if item is not None}
         return method(value, target_object=target_object, **extra_kwargs)
     if "target_object" in parameters:

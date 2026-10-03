@@ -1022,15 +1022,23 @@ class Snapshot:
                 if patched is not None:
                     text, next_yaml_state = patched
                 else:
-                    if (
+                    was_fast = (
                         same_path
                         and formatter is formatters.YAMLFormatter
                         and self._yaml_state is not None
-                        and self._last_text is not None
-                    ):
+                    )
+                    if was_fast and self._last_text is not None:
                         template = formatters.YAMLFormatter.loads(self._last_text)
                         rendered_data = _data_for_dump(template, data)
                     text = formatter.dumps(rendered_data)
+                    if was_fast and self._config.migrate is None:
+                        # Keep later saves on the fast path instead of dropping
+                        # to full round-trip dumps until the next load().
+                        fast_loaded = _yaml_fast.load(text)
+                        if fast_loaded is not None and _yaml_fast.semantic_equal(
+                            fast_loaded[0], rendered_data
+                        ):
+                            rendered_data, next_yaml_state = fast_loaded
             _write_text(
                 current_path,
                 text,
@@ -1061,7 +1069,17 @@ class Snapshot:
         try:
             fast_loaded = None
             if formatter is formatters.YAMLFormatter and self._config.migrate is None:
-                fast_loaded = _yaml_fast.load(text)
+                state = self._yaml_state
+                if (
+                    state is not None
+                    and state.text == text
+                    and self._loaded_path == current_path
+                ):
+                    # The file still holds the text this state was built from,
+                    # typically right after save(); skip parsing it again.
+                    fast_loaded = _yaml_fast.copy_state(state)
+                else:
+                    fast_loaded = _yaml_fast.load(text)
             if fast_loaded is None:
                 data = _load_data(current_path, text, self._config, self.stash)
                 yaml_state = None

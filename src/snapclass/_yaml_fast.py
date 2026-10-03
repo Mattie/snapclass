@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import dataclasses
 import importlib
 import importlib.metadata
@@ -123,6 +124,11 @@ def load(text: str) -> tuple[dict[str, Any], YAMLState] | None:
         scalars=scalars,
         block_scalars=block_scalars,
     )
+
+
+def copy_state(state: YAMLState) -> tuple[dict[str, Any], YAMLState]:
+    data = copy.deepcopy(state.data)
+    return data, dataclasses.replace(state, data=data)
 
 
 def patch(state: YAMLState, data: dict[str, Any]) -> tuple[str, YAMLState] | None:

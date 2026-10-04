@@ -410,7 +410,8 @@ def test_fast_yaml_structural_edit_falls_back_and_preserves_comments(tmp_path):
 
     assert path.read_text(encoding="utf-8") == "# Header\ntags:\n  - one\n  - two\n"
     assert Sample.snapshots.get("sample").tags == ["one", "two"]
-    assert sample.snapshot._yaml_state is None
+    assert sample.snapshot._yaml_state is not None
+    assert sample.snapshot._yaml_state.text == path.read_text(encoding="utf-8")
 
 
 @requires_fast_yaml
@@ -429,7 +430,14 @@ def test_fast_yaml_type_change_falls_back(tmp_path):
     sample.snapshot.save()
 
     assert path.read_text(encoding="utf-8") == "# Header\nvalue: 2\n"
-    assert sample.snapshot._yaml_state is None
+    assert sample.snapshot._yaml_state is not None
+    assert sample.snapshot._yaml_state.text == path.read_text(encoding="utf-8")
+
+    sample.value = 3
+    sample.snapshot.save()
+
+    assert path.read_text(encoding="utf-8") == "# Header\nvalue: 3\n"
+    assert sample.snapshot._yaml_state.text == path.read_text(encoding="utf-8")
 
 
 @requires_fast_yaml
@@ -487,13 +495,36 @@ def test_fast_yaml_retains_quoted_scalar_types_used_during_coercion():
     "text",
     [
         "base: &base one\nvalue: *base\n",
+        "value: &anchor one\n",
+        "items:\n  - &first one\n  - *first\n",
         "%YAML 1.2\n---\nvalue: one\n",
+        "%TAG !e! tag:example.com,2000:\n---\nvalue: !e!thing one\n",
         "value: !example one\n",
+        "value: !!str one\n",
+        "value: !<tag:yaml.org,2002:str> one\n",
         "value: one",
     ],
 )
 def test_fast_yaml_declines_unsupported_document_shapes(text):
     assert _yaml_fast.load(text) is None
+
+
+@requires_fast_yaml
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ratio: 50%\n",
+        "glob: '*.yml'\n",
+        "note: salt & pepper\n",
+        "shout: wow!\n",
+        "body: |\n  100% & *all* done!\n",
+    ],
+)
+def test_fast_yaml_loads_indicator_characters_inside_content(text):
+    loaded = _yaml_fast.load(text)
+
+    assert loaded is not None
+    assert _yaml_fast.semantic_equal(loaded[0], YAMLFormatter.loads(text))
 
 
 def test_custom_yaml_formatter_does_not_enter_fast_yaml_path(tmp_path, monkeypatch):
@@ -527,3 +558,76 @@ def test_custom_yaml_formatter_does_not_enter_fast_yaml_path(tmp_path, monkeypat
 
     assert sample.value == "kept"
     assert sample.snapshot._yaml_state is None
+
+
+@requires_fast_yaml
+def test_fast_yaml_fallback_keeps_fast_state_for_later_saves(tmp_path, monkeypatch):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Sample:
+        name: str
+        title: str = ""
+        tags: list[str] = field(default_factory=list)
+
+    path = tmp_path / "sample.yml"
+    path.write_text("# Header\ntitle: first\ntags:\n  - one\n", encoding="utf-8")
+    sample = Sample.snapshots.get("sample")
+    sample.tags.append("two")
+    sample.snapshot.save()
+
+    def no_round_trip(text):
+        raise AssertionError("save fell back to a round-trip parse")
+
+    monkeypatch.setattr(YAMLFormatter, "loads", no_round_trip)
+    sample.title = "second"
+    sample.snapshot.save()
+
+    assert path.read_text(encoding="utf-8") == (
+        "# Header\ntitle: second\ntags:\n  - one\n  - two\n"
+    )
+    assert type(sample.snapshot._loaded_data) is dict
+
+
+@requires_fast_yaml
+def test_fast_yaml_load_reuses_state_for_unchanged_text(tmp_path, monkeypatch):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Sample:
+        name: str
+        count: int = 0
+        tags: list[str] = field(default_factory=list)
+
+    path = tmp_path / "sample.yml"
+    path.write_text("count: 1\ntags:\n  - one\n", encoding="utf-8")
+    sample = Sample.snapshots.get("sample")
+    sample.count = "5"
+    sample.snapshot.save()
+    previous_state = sample.snapshot._yaml_state
+
+    def no_parse(text):
+        raise AssertionError("load parsed unchanged text again")
+
+    monkeypatch.setattr(_yaml_fast, "load", no_parse)
+    sample.snapshot.load()
+
+    assert sample.count == 5
+    assert sample.tags == ["one"]
+    sample.tags.append("two")
+    assert previous_state.data["tags"] == ["one"]
+    assert sample.snapshot._loaded_data is sample.snapshot._yaml_state.data
+    assert sample.snapshot._loaded_data is not previous_state.data
+
+
+@requires_fast_yaml
+def test_fast_yaml_load_parses_text_changed_on_disk(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Sample:
+        name: str
+        count: int = 0
+
+    path = tmp_path / "sample.yml"
+    path.write_text("count: 1\n", encoding="utf-8")
+    sample = Sample.snapshots.get("sample")
+    path.write_text("count: 7\n", encoding="utf-8")
+    sample.snapshot.load()
+
+    assert sample.count == 7
+    assert sample.snapshot._yaml_state.text == "count: 7\n"

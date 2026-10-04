@@ -416,3 +416,124 @@ def test_lifecycle_hook_failures_include_hook_name_and_path(tmp_path):
     loaded_message = str(loaded_error.value)
     assert "__snapclass_loaded__" in loaded_message
     assert "loaded.yml" in loaded_message
+
+
+def test_automatic_reads_reload_edits_that_keep_size_and_mtime(tmp_path):
+    import os
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    path = tmp_path / "sample.yml"
+    before = path.stat()
+    path.write_text(path.read_text(encoding="utf-8").replace("first", "edits"), encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_size == before.st_size
+    assert path.stat().st_mtime == before.st_mtime
+
+    assert item.value == "edits"
+
+
+def test_conflict_raise_detects_edits_that_keep_size_and_mtime(tmp_path):
+    import os
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True, conflict="raise")
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    item.snapshot.save()
+    path = tmp_path / "sample.yml"
+    before = path.stat()
+    path.write_text(path.read_text(encoding="utf-8").replace("first", "edits"), encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert item.snapshot.modified is True
+    item.value = "local"
+    with pytest.raises(SnapclassError, match="externally modified"):
+        item.snapshot.save()
+
+
+def test_snapshot_modified_and_reload_checks_for_missing_files(tmp_path):
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path), manual=True)
+    class Item:
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    assert item.snapshot.modified is True
+    assert item.snapshot._needs_reload() is False
+    item.snapshot.save()
+    assert item.snapshot.modified is False
+    (tmp_path / "sample.yml").unlink()
+    assert item.snapshot.modified is True
+    assert item.snapshot._needs_reload() is False
+
+
+def test_snapclass_supports_classes_with_unhashable_metaclass(tmp_path):
+    class EqualityMeta(type):
+        def __eq__(cls, other):
+            return cls is other
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item(metaclass=EqualityMeta):
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    item.value = "second"
+
+    assert item.value == "second"
+    assert Item.snapshots.get("sample").value == "second"
+
+
+def test_field_names_stay_separate_for_classes_that_compare_equal(tmp_path):
+    from snapclass.schemas import _field_names
+
+    class SameMeta(type):
+        def __eq__(cls, other):
+            return isinstance(other, SameMeta)
+
+        def __hash__(cls):
+            return 1
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "a"))
+    class First(metaclass=SameMeta):
+        name: str
+        alpha: str = ""
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "b"))
+    class Second(metaclass=SameMeta):
+        name: str
+        beta: str = ""
+
+    first = First("sample", "one")
+    second = Second("sample", "two")
+    (tmp_path / "b" / "sample.yml").write_text("beta: edited\n", encoding="utf-8")
+
+    assert _field_names(First) == {"name", "alpha"}
+    assert _field_names(Second) == {"name", "beta"}
+    assert first.alpha == "one"
+    assert second.beta == "edited"
+
+
+def test_field_names_are_not_inherited_by_subclasses_with_new_fields(tmp_path):
+    from dataclasses import dataclass
+
+    from snapclass.schemas import _field_names
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Base:
+        name: str
+
+    assert _field_names(Base) == {"name"}
+
+    @dataclass
+    class Child(Base):
+        extra: str = ""
+
+    assert _field_names(Child) == {"name", "extra"}

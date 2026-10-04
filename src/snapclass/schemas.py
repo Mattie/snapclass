@@ -12,6 +12,7 @@ import tempfile
 import time
 import types
 import warnings
+import weakref
 from collections import Counter, defaultdict, deque
 from collections.abc import Iterator, Mapping, MutableMapping, Set as AbstractSet
 from contextlib import contextmanager
@@ -40,6 +41,35 @@ _PENDING_SIDECARS_ATTR = "__snapclass_pending_sidecars__"
 
 class SnapclassError(Exception):
     pass
+
+
+_FIELD_NAMES_ATTR = "__snapclass_field_names__"
+
+
+def _field_names(cls: type) -> frozenset[str]:
+    # Cache in the class's own __dict__ so the entry belongs to exactly this
+    # class; a dict keyed by class would rely on the metaclass's __eq__ and
+    # __hash__, which may be missing or treat distinct classes as equal.
+    names = vars(cls).get(_FIELD_NAMES_ATTR)
+    if isinstance(names, frozenset):
+        return names
+    names = frozenset(field.name for field in dataclasses.fields(cls))
+    try:
+        type.__setattr__(cls, _FIELD_NAMES_ATTR, names)
+    except (AttributeError, TypeError):
+        pass
+    return names
+
+
+def _stat_if_exists(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except (OSError, ValueError):
+        # Defer to Path.exists() so "missing" means the same as before on
+        # every supported Python version; anything else still raises.
+        if not path.exists():
+            return None
+        raise
 
 
 def _is_missing(value: Any) -> bool:
@@ -651,8 +681,7 @@ def _install(cls: type, config: Config) -> None:
             should_track
             and _auto_enabled(snapshot._config, self)
             and not getattr(self, "_snapclass_loading", False)
-            and snapshot.exists
-            and snapshot.modified
+            and snapshot._needs_reload()
         ):
             snapshot.load()
         original_setattr(self, name, value)
@@ -667,9 +696,7 @@ def _install(cls: type, config: Config) -> None:
                 object.__setattr__(self, name, _track_value(value, snapshot))
             elif dataclasses.is_dataclass(value) and not isinstance(value, type):
                 _wrap_dataclass_mutables(value, snapshot, set())
-            if snapshot._config.infer and name not in {
-                field.name for field in dataclasses.fields(self)
-            }:
+            if snapshot._config.infer and name not in _field_names(self.__class__):
                 inferred = set(getattr(self, _INFERRED_FIELDS_ATTR, set()))
                 inferred.add(name)
                 object.__setattr__(self, _INFERRED_FIELDS_ATTR, inferred)
@@ -696,15 +723,13 @@ def _install(cls: type, config: Config) -> None:
             return original_getattribute(self, name)
         snapshot = object.__getattribute__(self, "__dict__").get("snapshot")
         config = snapshot._config if snapshot is not None else object.__getattribute__(self, "__class__").__snapclass_config__
-        field_names = {field.name for field in dataclasses.fields(self)}
         if (
-            name in field_names
+            name in _field_names(object.__getattribute__(self, "__class__"))
             and snapshot is not None
             and _auto_enabled(config, self)
             and not object.__getattribute__(self, "__dict__").get("_snapclass_initializing", False)
             and not object.__getattribute__(self, "__dict__").get("_snapclass_loading", False)
-            and snapshot.exists
-            and snapshot.modified
+            and snapshot._needs_reload()
         ):
             snapshot.load()
         return original_getattribute(self, name)
@@ -858,16 +883,30 @@ class Snapshot:
 
     @property
     def modified(self) -> bool:
-        if not self.exists:
+        path = self.path
+        stat = _stat_if_exists(path) if path is not None else None
+        if stat is None:
             return True
+        return self._modified_since(path, stat)
+
+    def _needs_reload(self) -> bool:
+        # Equivalent to `self.exists and self.modified`, but resolves the path
+        # and stats the file once.
+        path = self.path
+        stat = _stat_if_exists(path) if path is not None else None
+        if stat is None:
+            return False
+        return self._modified_since(path, stat)
+
+    def _modified_since(self, path: Path, stat: os.stat_result) -> bool:
         if self._last_mtime is None:
             return True
-        if self.path.stat().st_mtime != self._last_mtime:
+        if stat.st_mtime != self._last_mtime:
             return True
         if self._last_text is None:
             return False
-        formatter = _formatter_for(self.path, self._config, self.stash)
-        return _read_snapshot_text(self.path, formatter) != self._last_text
+        formatter = _formatter_for(path, self._config, self.stash)
+        return _read_snapshot_text(path, formatter) != self._last_text
 
     @modified.setter
     def modified(self, modified: bool) -> None:
@@ -990,15 +1029,23 @@ class Snapshot:
                 if patched is not None:
                     text, next_yaml_state = patched
                 else:
-                    if (
+                    was_fast = (
                         same_path
                         and formatter is formatters.YAMLFormatter
                         and self._yaml_state is not None
-                        and self._last_text is not None
-                    ):
+                    )
+                    if was_fast and self._last_text is not None:
                         template = formatters.YAMLFormatter.loads(self._last_text)
                         rendered_data = _data_for_dump(template, data)
                     text = formatter.dumps(rendered_data)
+                    if was_fast and self._config.migrate is None:
+                        # Keep later saves on the fast path instead of dropping
+                        # to full round-trip dumps until the next load().
+                        fast_loaded = _yaml_fast.load(text)
+                        if fast_loaded is not None and _yaml_fast.semantic_equal(
+                            fast_loaded[0], rendered_data
+                        ):
+                            rendered_data, next_yaml_state = fast_loaded
             _write_text(
                 current_path,
                 text,
@@ -1029,7 +1076,17 @@ class Snapshot:
         try:
             fast_loaded = None
             if formatter is formatters.YAMLFormatter and self._config.migrate is None:
-                fast_loaded = _yaml_fast.load(text)
+                state = self._yaml_state
+                if (
+                    state is not None
+                    and state.text == text
+                    and self._loaded_path == current_path
+                ):
+                    # The file still holds the text this state was built from,
+                    # typically right after save(); skip parsing it again.
+                    fast_loaded = _yaml_fast.copy_state(state)
+                else:
+                    fast_loaded = _yaml_fast.load(text)
             if fast_loaded is None:
                 data = _load_data(current_path, text, self._config, self.stash)
                 yaml_state = None
@@ -2077,7 +2134,7 @@ def _preserved_unknown_data(
     data = getattr(instance, _UNKNOWN_DATA_ATTR, {})
     if not isinstance(data, dict):
         return {}
-    known_fields = {field.name for field in dataclasses.fields(instance)}
+    known_fields = _field_names(instance.__class__)
     return {
         key: _plain(value, minimal_diffs)
         for key, value in data.items()
@@ -2088,7 +2145,7 @@ def _preserved_unknown_data(
 def _prepare_data_with_unknowns(
     instance: object, data: dict[str, Any], config: Config
 ) -> dict[str, Any]:
-    field_names = {field.name for field in dataclasses.fields(instance)}
+    field_names = _field_names(instance.__class__)
     unknown_data = {key: value for key, value in data.items() if key not in field_names}
 
     if config.unknown == "preserve":
@@ -2144,7 +2201,7 @@ def _inferred_attr_names(instance: object) -> set[str]:
     names = getattr(instance, _INFERRED_FIELDS_ATTR, set())
     if not isinstance(names, set):
         return set()
-    known_fields = {field.name for field in dataclasses.fields(instance)}
+    known_fields = _field_names(instance.__class__)
     return {name for name in names if name not in known_fields}
 
 
@@ -2324,17 +2381,44 @@ def _to_preserialization_value(
     )
 
 
-def _call_serializer(method: Any, value: Any, target_object: Any, **kwargs: Any) -> Any:
+_SERIALIZER_PARAMETERS: "weakref.WeakKeyDictionary[Any, tuple[frozenset[str], bool]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _serializer_parameters(method: Any) -> tuple[frozenset[str], bool]:
+    # Serializer classes made by map_type() are new on each call but share the
+    # underlying function, so cache on __func__ rather than the bound method.
+    func = getattr(method, "__func__", None)
+    if func is not None:
+        try:
+            cached = _SERIALIZER_PARAMETERS.get(func)
+        except TypeError:
+            func = None
+        else:
+            if cached is not None:
+                return cached
     parameters = inspect.signature(method).parameters
+    result = (
+        frozenset(parameters),
+        any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ),
+    )
+    if func is not None:
+        _SERIALIZER_PARAMETERS[func] = result
+    return result
+
+
+def _call_serializer(method: Any, value: Any, target_object: Any, **kwargs: Any) -> Any:
+    parameters, accepts_var_keyword = _serializer_parameters(method)
     optional_kwargs = {
         name: value
         for name, value in kwargs.items()
         if value is not None and name in parameters
     }
-    if any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    ):
+    if accepts_var_keyword:
         extra_kwargs = {key: item for key, item in kwargs.items() if item is not None}
         return method(value, target_object=target_object, **extra_kwargs)
     if "target_object" in parameters:

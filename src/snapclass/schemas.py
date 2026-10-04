@@ -47,7 +47,12 @@ _FIELD_NAMES: "weakref.WeakKeyDictionary[type, frozenset[str]]" = weakref.WeakKe
 
 
 def _field_names(cls: type) -> frozenset[str]:
-    names = _FIELD_NAMES.get(cls)
+    try:
+        names = _FIELD_NAMES.get(cls)
+    except TypeError:
+        # A metaclass that defines __eq__ without __hash__ makes the class
+        # unhashable; skip the cache for it.
+        return frozenset(field.name for field in dataclasses.fields(cls))
     if names is None:
         names = frozenset(field.name for field in dataclasses.fields(cls))
         _FIELD_NAMES[cls] = names

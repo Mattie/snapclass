@@ -472,3 +472,20 @@ def test_snapshot_modified_and_reload_checks_for_missing_files(tmp_path):
     (tmp_path / "sample.yml").unlink()
     assert item.snapshot.modified is True
     assert item.snapshot._needs_reload() is False
+
+
+def test_snapclass_supports_classes_with_unhashable_metaclass(tmp_path):
+    class EqualityMeta(type):
+        def __eq__(cls, other):
+            return cls is other
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Item(metaclass=EqualityMeta):
+        name: str
+        value: str = ""
+
+    item = Item("sample", "first")
+    item.value = "second"
+
+    assert item.value == "second"
+    assert Item.snapshots.get("sample").value == "second"

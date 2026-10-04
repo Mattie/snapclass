@@ -43,19 +43,21 @@ class SnapclassError(Exception):
     pass
 
 
-_FIELD_NAMES: "weakref.WeakKeyDictionary[type, frozenset[str]]" = weakref.WeakKeyDictionary()
+_FIELD_NAMES_ATTR = "__snapclass_field_names__"
 
 
 def _field_names(cls: type) -> frozenset[str]:
+    # Cache in the class's own __dict__ so the entry belongs to exactly this
+    # class; a dict keyed by class would rely on the metaclass's __eq__ and
+    # __hash__, which may be missing or treat distinct classes as equal.
+    names = vars(cls).get(_FIELD_NAMES_ATTR)
+    if isinstance(names, frozenset):
+        return names
+    names = frozenset(field.name for field in dataclasses.fields(cls))
     try:
-        names = _FIELD_NAMES.get(cls)
-    except TypeError:
-        # A metaclass that defines __eq__ without __hash__ makes the class
-        # unhashable; skip the cache for it.
-        return frozenset(field.name for field in dataclasses.fields(cls))
-    if names is None:
-        names = frozenset(field.name for field in dataclasses.fields(cls))
-        _FIELD_NAMES[cls] = names
+        type.__setattr__(cls, _FIELD_NAMES_ATTR, names)
+    except (AttributeError, TypeError):
+        pass
     return names
 
 

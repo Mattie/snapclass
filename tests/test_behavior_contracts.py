@@ -489,3 +489,51 @@ def test_snapclass_supports_classes_with_unhashable_metaclass(tmp_path):
 
     assert item.value == "second"
     assert Item.snapshots.get("sample").value == "second"
+
+
+def test_field_names_stay_separate_for_classes_that_compare_equal(tmp_path):
+    from snapclass.schemas import _field_names
+
+    class SameMeta(type):
+        def __eq__(cls, other):
+            return isinstance(other, SameMeta)
+
+        def __hash__(cls):
+            return 1
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "a"))
+    class First(metaclass=SameMeta):
+        name: str
+        alpha: str = ""
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path / "b"))
+    class Second(metaclass=SameMeta):
+        name: str
+        beta: str = ""
+
+    first = First("sample", "one")
+    second = Second("sample", "two")
+    (tmp_path / "b" / "sample.yml").write_text("beta: edited\n", encoding="utf-8")
+
+    assert _field_names(First) == {"name", "alpha"}
+    assert _field_names(Second) == {"name", "beta"}
+    assert first.alpha == "one"
+    assert second.beta == "edited"
+
+
+def test_field_names_are_not_inherited_by_subclasses_with_new_fields(tmp_path):
+    from dataclasses import dataclass
+
+    from snapclass.schemas import _field_names
+
+    @snapclass("{self.name}.yml", stash=Stash(tmp_path))
+    class Base:
+        name: str
+
+    assert _field_names(Base) == {"name"}
+
+    @dataclass
+    class Child(Base):
+        extra: str = ""
+
+    assert _field_names(Child) == {"name", "extra"}
